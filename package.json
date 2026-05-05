@@ -1,9 +1,14 @@
 {
   "name": "preview-excel-builder",
-  "version": "2.0.0",
-  "description": "Vercel Function – builds Excel preview files using templates",
+  "version": "1.0.0",
+  "description": "Vercel Serverless Function für die Excel-Preview-Generierung im Recruiting-Workflow",
+  "private": true,
   "type": "module",
+  "engines": {
+    "node": ">=20.x"
+  },
   "dependencies": {
-    "exceljs": "^4.4.0"
+    "exceljs": "^4.4.0",
+    "@vercel/blob": "^2.3.3"
   }
 }
