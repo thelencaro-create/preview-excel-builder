@@ -33,7 +33,200 @@ const TN_START  = 7;
 const TN_END    = 16;
 const ANT_START = TN_END + 2;
 
-// ── SHEET KOPIEREN (inkl. Bilder + Bed. Formatierung) ─────────────────────────
+// ── BUG 4: LOGO BASE64 ────────────────────────────────────────────────────────
+// Option A: Logo direkt als Base64 einbetten (einmalig aus Template extrahieren).
+// Führe dazu einmalig aus: node extract-logo.js (siehe unten) und ersetze den Wert.
+// Solange dieser String leer ist, wird stattdessen der dynamische Kopierversuch genutzt.
+//
+// So extrahierst du den String:
+//   const wb = new ExcelJS.Workbook();
+//   await wb.xlsx.readFile('template.xlsx');
+//   const img = wb.getImage(wb.getWorksheet('GD')._images[0].imageId);
+//   console.log(img.buffer.toString('base64'));
+//
+const LOGO_BASE64 = ''; // <-- Hier den Base64-String des Logos einfügen
+
+// ── BEDINGTE FORMATIERUNG MANUELL ─────────────────────────────────────────────
+// BUG 2 + 3: Statt CF zu kopieren (führte zu Strikethrough + falschem Format)
+// werden alle Regeln für Spalte A und B manuell gesetzt.
+function addConditionalFormats(ws) {
+
+  // ── Spalte A: Freigabe-Status ────────────────────────────────────────────
+  ws.addConditionalFormatting({
+    ref: '$A$7:$A$16',
+    rules: [
+      // ausgeladen → Rot dunkel, weiße fette Schrift
+      {
+        type: 'formula',
+        priority: 1,
+        formulae: ['=$A7="ausgeladen"'],
+        style: {
+          fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFC00000' } },
+          font: { color: { argb: 'FFFFFFFF' }, bold: true, strikethrough: false },
+        },
+      },
+      // Ausfall, da kein Reminder → Rot dunkel
+      {
+        type: 'formula',
+        priority: 2,
+        formulae: ['=$A7="Ausfall, da kein Reminder"'],
+        style: {
+          fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFC00000' } },
+          font: { color: { argb: 'FFFFFFFF' }, bold: true, strikethrough: false },
+        },
+      },
+      // Admin Freigabe → Grün
+      {
+        type: 'formula',
+        priority: 3,
+        formulae: ['=$A7="Admin Freigabe"'],
+        style: {
+          fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF70AD47' } },
+          font: { color: { argb: 'FF000000' }, bold: false, strikethrough: false },
+        },
+      },
+      // abgesagt → Rot hell
+      {
+        type: 'formula',
+        priority: 4,
+        formulae: ['=$A7="abgesagt"'],
+        style: {
+          fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFF0000' } },
+          font: { color: { argb: 'FFFFFFFF' }, bold: false, strikethrough: false },
+        },
+      },
+      // Interviewer Freigabe → Gelb
+      {
+        type: 'formula',
+        priority: 5,
+        formulae: ['=$A7="Interviewer Freigabe"'],
+        style: {
+          fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFFFC0' } },
+          font: { color: { argb: 'FF000000' }, bold: false, strikethrough: false },
+        },
+      },
+      // Ersatz → Grün hell
+      {
+        type: 'formula',
+        priority: 6,
+        formulae: ['=$A7="Ersatz"'],
+        style: {
+          fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFA9D18E' } },
+          font: { color: { argb: 'FF000000' }, bold: false, strikethrough: false },
+        },
+      },
+      // Umterminierung → Blau hell
+      {
+        type: 'formula',
+        priority: 7,
+        formulae: ['=$A7="Umterminierung"'],
+        style: {
+          fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFB4C6E7' } },
+          font: { color: { argb: 'FF000000' }, bold: false, strikethrough: false },
+        },
+      },
+      // Umterminierung (Kunde) → Blau hell
+      {
+        type: 'formula',
+        priority: 8,
+        formulae: ['=$A7="Umterminierung (Kunde)"'],
+        style: {
+          fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFB4C6E7' } },
+          font: { color: { argb: 'FF000000' }, bold: false, strikethrough: false },
+        },
+      },
+      // onhold → Orange-Rot
+      {
+        type: 'formula',
+        priority: 9,
+        formulae: ['=$A7="onhold (nicht ins Update)"'],
+        style: {
+          fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFED7D31' } },
+          font: { color: { argb: 'FFFFFFFF' }, bold: false, strikethrough: false },
+        },
+      },
+    ],
+  });
+
+  // ── Spalte B: Projektabschluss ───────────────────────────────────────────
+  ws.addConditionalFormatting({
+    ref: '$B$7:$B$16',
+    rules: [
+      // teilgenommen → Grün
+      {
+        type: 'formula',
+        priority: 1,
+        formulae: ['=$B7="teilgenommen"'],
+        style: {
+          fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF70AD47' } },
+          font: { color: { argb: 'FF000000' }, bold: false, strikethrough: false },
+        },
+      },
+      // ausgezahlt → Grün hell
+      {
+        type: 'formula',
+        priority: 2,
+        formulae: ['=$B7="ausgezahlt"'],
+        style: {
+          fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFA9D18E' } },
+          font: { color: { argb: 'FF000000' }, bold: false, strikethrough: false },
+        },
+      },
+      // kam zu spät ohne Ankündigung → Grau mittel
+      {
+        type: 'formula',
+        priority: 3,
+        formulae: ['=$B7="kam zu spät ohne Ankündigung"'],
+        style: {
+          fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF808080' } },
+          font: { color: { argb: 'FFFFFFFF' }, bold: false, strikethrough: false },
+        },
+      },
+      // kam zu spät mit Ankündigung → Grau mittel
+      {
+        type: 'formula',
+        priority: 4,
+        formulae: ['=$B7="kam zu spät mit Ankündigung"'],
+        style: {
+          fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF808080' } },
+          font: { color: { argb: 'FFFFFFFF' }, bold: false, strikethrough: false },
+        },
+      },
+      // nicht erschienen → Grau dunkel
+      {
+        type: 'formula',
+        priority: 5,
+        formulae: ['=$B7="nicht erschienen"'],
+        style: {
+          fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF595959' } },
+          font: { color: { argb: 'FFFFFFFF' }, bold: false, strikethrough: false },
+        },
+      },
+      // kurzfristig abgesagt → Grau dunkel
+      {
+        type: 'formula',
+        priority: 6,
+        formulae: ['=$B7="kurzfristig abgesagt"'],
+        style: {
+          fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF595959' } },
+          font: { color: { argb: 'FFFFFFFF' }, bold: false, strikethrough: false },
+        },
+      },
+      // abgesagt durch Kunde → Grau dunkel
+      {
+        type: 'formula',
+        priority: 7,
+        formulae: ['=$B7="abgesagt durch Kunde"'],
+        style: {
+          fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF595959' } },
+          font: { color: { argb: 'FFFFFFFF' }, bold: false, strikethrough: false },
+        },
+      },
+    ],
+  });
+}
+
+// ── SHEET KOPIEREN (ohne CF – wird separat gesetzt) ───────────────────────────
 function copyWorksheet(srcWs, dstWs, srcWorkbook, dstWorkbook) {
 
   // Spaltenbreiten
@@ -75,30 +268,45 @@ function copyWorksheet(srcWs, dstWs, srcWorkbook, dstWorkbook) {
     });
   }
 
-  // Bedingte Formatierung
-  if (srcWs.conditionalFormattings?.length) {
-    srcWs.conditionalFormattings.forEach(cf => {
-      try { dstWs.addConditionalFormatting(cf); } catch(e) {}
-    });
-  }
+  // BUG 2+3: Bedingte Formatierung wird NICHT mehr aus dem Template kopiert
+  // (führte zu Strikethrough + falschen Farben). Stattdessen: addConditionalFormats()
+  // wird nach copyWorksheet() explizit aufgerufen.
 
-  // Bilder (Logo)
-  if (srcWs._images?.length && srcWorkbook && dstWorkbook) {
+  // BUG 4: Logo kopieren
+  // Strategie 1 (Vorrang): Hardcodierter Base64-String (LOGO_BASE64 oben setzen)
+  // Strategie 2 (Fallback): Dynamischer Kopierversuch aus dem Source-Workbook
+  if (LOGO_BASE64) {
+    try {
+      const logoId = dstWorkbook.addImage({
+        base64:    LOGO_BASE64,
+        extension: 'png',
+      });
+      // Position aus Template-Original: Logo liegt in A1:D5 (Spalte 0-3, Zeile 0-4)
+      dstWs.addImage(logoId, {
+        tl: { col: 0, row: 0 },
+        br: { col: 3, row: 4 },
+        editAs: 'oneCell',
+      });
+    } catch(e) {
+      console.error('Logo (Base64) Fehler:', e.message);
+    }
+  } else if (srcWs._images?.length && srcWorkbook && dstWorkbook) {
+    // Fallback: dynamisches Kopieren
     srcWs._images.forEach(img => {
       try {
         const srcImage = srcWorkbook.getImage(img.imageId);
-        if (srcImage) {
-          const newId = dstWorkbook.addImage({
-            buffer:    srcImage.buffer,
-            extension: srcImage.extension,
-          });
-          dstWs.addImage(newId, img.range || {
-            tl: { col: img.col,  row: img.row },
-            br: { col: img.col2, row: img.row2 },
-          });
+        if (srcImage?.buffer) {
+          const ext   = srcImage.extension || srcImage.type || 'png';
+          const newId = dstWorkbook.addImage({ buffer: srcImage.buffer, extension: ext });
+          // Range normalisieren: ExcelJS nutzt img.range, ältere Versionen img.col/row
+          const range = img.range ?? {
+            tl: { col: img.col  ?? 0, row: img.row  ?? 0 },
+            br: { col: img.col2 ?? 3, row: img.row2 ?? 4 },
+          };
+          dstWs.addImage(newId, range);
         }
       } catch(e) {
-        console.error('Image copy error:', e.message);
+        console.error('Logo (dynamisch) Fehler:', e.message);
       }
     });
   }
@@ -123,8 +331,17 @@ function styleAnswer(cell, isScreenout) {
   cell.alignment = { wrapText: true, vertical: 'top' };
 }
 
+// ── THIN BORDER HELPER ────────────────────────────────────────────────────────
+const THIN_BORDER = {
+  top:    { style: 'thin', color: { argb: 'FFCCCCCC' } },
+  bottom: { style: 'thin', color: { argb: 'FFCCCCCC' } },
+  left:   { style: 'thin', color: { argb: 'FFCCCCCC' } },
+  right:  { style: 'thin', color: { argb: 'FFCCCCCC' } },
+};
+
 // ── SHEET BEFÜLLEN ────────────────────────────────────────────────────────────
-function fillSheet(ws, gruppe, fragen, projektnummer, projektname, setting, methode) {
+// BUG 1: kundenname als eigener Parameter (statt projektname im Kunde-Feld)
+function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, setting, methode) {
   const hmap   = HEADER_MAP[setting] || HEADER_MAP.offline;
   const cfg    = SHEET_CONFIG[methode] || SHEET_CONFIG['GD'];
   const termin = gruppe.termin || `${gruppe.datum||''} ${gruppe.uhrzeit||''}`.trim();
@@ -134,7 +351,8 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, setting, meth
     ws.getCell(hmap.studio).value = `${gruppe.unternehmen||''} ${gruppe.standort||''}`.trim();
   }
   ws.getCell(hmap.termin).value     = termin;
-  ws.getCell(hmap.kunde).value      = projektname;
+  // BUG 1 FIX: Auftraggeber/Kundenname statt Projektname
+  ws.getCell(hmap.kunde).value      = kundenname || projektname;
   ws.getCell(hmap.zielgruppe).value = gruppe.zielgruppe || 'Allgemein';
   ws.getCell(hmap.projekt).value    = projektname;
   ws.getCell(hmap.projNr).value     = projektnummer;
@@ -165,11 +383,13 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, setting, meth
       hCell.note = `Quoten:\n${frage.quotenKommentar}`;
     }
 
-    // TN-Zeilen leeren
+    // BUG 5 FIX: TN-Zeilen leeren UND Rahmen explizit setzen
     for (let r = TN_START; r <= TN_END; r++) {
       const tnCell = ws.getCell(r, col);
-      tnCell.value = null;
-      tnCell.fill  = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFFFFF' } };
+      tnCell.value  = null;
+      tnCell.fill   = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFFFFF' } };
+      tnCell.border = { ...THIN_BORDER };
+      tnCell.alignment = { wrapText: true, vertical: 'top' };
     }
   });
 
@@ -180,7 +400,7 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, setting, meth
     ws.getRow(row).height = 14;
 
     fragen.forEach((frage, fi) => {
-      const col    = startCol + fi;
+      const col     = startCol + fi;
       const antwort = (frage.antworten||[])[a];
       if (!antwort) return;
       const cell = ws.getCell(row, col);
@@ -207,12 +427,19 @@ export default async function handler(req, res) {
   try {
     const {
       templateBase64, projektnummer, projektname,
+      // BUG 1: kundenname aus Request-Body lesen
+      kundenname,
       methode, isIDI, gruppen, fragen
     } = req.body ?? {};
 
+    // Auftraggeber: kundenname bevorzugt, Fallback auf projektname
+    const auftraggeber = kundenname || projektname || '';
+
     console.log('Request:', {
-      hasTemplate: !!templateBase64,
-      projektnummer, projektname, methode, isIDI,
+      hasTemplate:  !!templateBase64,
+      projektnummer, projektname,
+      kundenname:   auftraggeber,
+      methode, isIDI,
       gruppenCount: gruppen?.length,
       fragenCount:  fragen?.length,
     });
@@ -248,7 +475,10 @@ export default async function handler(req, res) {
       const sheetName   = methode === 'VDI' ? 'VDIs' : 'IDIs';
       const dstWs       = result.addWorksheet(sheetName);
       copyWorksheet(srcWs, dstWs, template, result);
-      fillSheet(dstWs, hauptGruppe, fragenArr, projektnummer, projektname, setting, methode);
+      // BUG 2+3: CF manuell setzen statt kopieren
+      addConditionalFormats(dstWs);
+      // BUG 1: auftraggeber übergeben
+      fillSheet(dstWs, hauptGruppe, fragenArr, projektnummer, projektname, auftraggeber, setting, methode);
       newSheetNames.push(sheetName);
 
     } else {
@@ -262,7 +492,10 @@ export default async function handler(req, res) {
         );
         const dstWs = result.addWorksheet(sheetName);
         copyWorksheet(srcWs, dstWs, template, result);
-        fillSheet(dstWs, gruppe, fragenFG, projektnummer, projektname, setting, gruppe.methode);
+        // BUG 2+3: CF manuell setzen statt kopieren
+        addConditionalFormats(dstWs);
+        // BUG 1: auftraggeber übergeben
+        fillSheet(dstWs, gruppe, fragenFG, projektnummer, projektname, auftraggeber, setting, gruppe.methode);
         newSheetNames.push(sheetName);
       }
     }
@@ -275,11 +508,12 @@ export default async function handler(req, res) {
     return res.status(200).json({
       excelBase64, dateiname, success: true,
       debug: {
-        fragenCount:  fragenArr.length,
-        gruppenCount: gruppen.length,
-        sheets:       newSheetNames,
+        fragenCount:   fragenArr.length,
+        gruppenCount:  gruppen.length,
+        sheets:        newSheetNames,
         quoteStartCol: cfg.quoteStartCol,
         setting,
+        kundenname:    auftraggeber,
       }
     });
 
