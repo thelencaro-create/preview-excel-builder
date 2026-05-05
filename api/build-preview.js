@@ -33,62 +33,52 @@ const TN_START  = 7;
 const TN_END    = 16;
 const ANT_START = TN_END + 2;
 
-// ── BUG 4: LOGO BASE64 ────────────────────────────────────────────────────────
-// Einmalig aus Template extrahieren und hier einfügen:
-//   const wb = new ExcelJS.Workbook();
-//   await wb.xlsx.readFile('template.xlsx');
-//   const img = wb.getImage(wb.getWorksheet('GD')._images[0].imageId);
-//   console.log(img.buffer.toString('base64'));
 const LOGO_BASE64 = ''; // <-- Base64-String des Logos einfügen
 
 // ── BEDINGTE FORMATIERUNG ─────────────────────────────────────────────────────
-// BUG 2+3: Nur "fill" in CF-Regeln – kein "font"-Property!
-// ExcelJS serialisiert font-Properties in CF-Regeln zu kaputtem XML
-// (HRESULT 0x8000ffff, sheet1.xml/sheet2.xml-Fehler).
+// KEIN "priority", KEIN "font" in CF-Rules – beides erzeugt kaputtes XML in ExcelJS
 function addConditionalFormats(ws) {
 
-  // Spalte A – Freigabe-Status
   ws.addConditionalFormatting({
     ref: '$A$7:$A$16',
     rules: [
-      { type: 'formula', priority: 1, formulae: ['=$A7="ausgeladen"'],
+      { type: 'formula', formulae: ['=$A7="ausgeladen"'],
         style: { fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFC00000' } } } },
-      { type: 'formula', priority: 2, formulae: ['=$A7="Ausfall, da kein Reminder"'],
+      { type: 'formula', formulae: ['=$A7="Ausfall, da kein Reminder"'],
         style: { fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFC00000' } } } },
-      { type: 'formula', priority: 3, formulae: ['=$A7="Admin Freigabe"'],
+      { type: 'formula', formulae: ['=$A7="Admin Freigabe"'],
         style: { fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF70AD47' } } } },
-      { type: 'formula', priority: 4, formulae: ['=$A7="abgesagt"'],
+      { type: 'formula', formulae: ['=$A7="abgesagt"'],
         style: { fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFF0000' } } } },
-      { type: 'formula', priority: 5, formulae: ['=$A7="Interviewer Freigabe"'],
+      { type: 'formula', formulae: ['=$A7="Interviewer Freigabe"'],
         style: { fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFFFC0' } } } },
-      { type: 'formula', priority: 6, formulae: ['=$A7="Ersatz"'],
+      { type: 'formula', formulae: ['=$A7="Ersatz"'],
         style: { fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFA9D18E' } } } },
-      { type: 'formula', priority: 7, formulae: ['=$A7="Umterminierung"'],
+      { type: 'formula', formulae: ['=$A7="Umterminierung"'],
         style: { fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFB4C6E7' } } } },
-      { type: 'formula', priority: 8, formulae: ['=$A7="Umterminierung (Kunde)"'],
+      { type: 'formula', formulae: ['=$A7="Umterminierung (Kunde)"'],
         style: { fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFB4C6E7' } } } },
-      { type: 'formula', priority: 9, formulae: ['=$A7="onhold (nicht ins Update)"'],
+      { type: 'formula', formulae: ['=$A7="onhold (nicht ins Update)"'],
         style: { fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFED7D31' } } } },
     ],
   });
 
-  // Spalte B – Projektabschluss
   ws.addConditionalFormatting({
     ref: '$B$7:$B$16',
     rules: [
-      { type: 'formula', priority: 1, formulae: ['=$B7="teilgenommen"'],
+      { type: 'formula', formulae: ['=$B7="teilgenommen"'],
         style: { fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF70AD47' } } } },
-      { type: 'formula', priority: 2, formulae: ['=$B7="ausgezahlt"'],
+      { type: 'formula', formulae: ['=$B7="ausgezahlt"'],
         style: { fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFA9D18E' } } } },
-      { type: 'formula', priority: 3, formulae: ['=$B7="kam zu spät ohne Ankündigung"'],
+      { type: 'formula', formulae: ['=$B7="kam zu spät ohne Ankündigung"'],
         style: { fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF808080' } } } },
-      { type: 'formula', priority: 4, formulae: ['=$B7="kam zu spät mit Ankündigung"'],
+      { type: 'formula', formulae: ['=$B7="kam zu spät mit Ankündigung"'],
         style: { fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF808080' } } } },
-      { type: 'formula', priority: 5, formulae: ['=$B7="nicht erschienen"'],
+      { type: 'formula', formulae: ['=$B7="nicht erschienen"'],
         style: { fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF595959' } } } },
-      { type: 'formula', priority: 6, formulae: ['=$B7="kurzfristig abgesagt"'],
+      { type: 'formula', formulae: ['=$B7="kurzfristig abgesagt"'],
         style: { fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF595959' } } } },
-      { type: 'formula', priority: 7, formulae: ['=$B7="abgesagt durch Kunde"'],
+      { type: 'formula', formulae: ['=$B7="abgesagt durch Kunde"'],
         style: { fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF595959' } } } },
     ],
   });
@@ -134,12 +124,11 @@ function copyWorksheet(srcWs, dstWs, srcWorkbook, dstWorkbook) {
 
   // CF wird NICHT kopiert → addConditionalFormats() setzt sie sauber neu.
 
-  // BUG 4: Logo
   if (LOGO_BASE64) {
     try {
       const logoId = dstWorkbook.addImage({ base64: LOGO_BASE64, extension: 'png' });
       dstWs.addImage(logoId, { tl: { col: 0, row: 0 }, br: { col: 3, row: 4 }, editAs: 'oneCell' });
-    } catch(e) { console.error('Logo (Base64) Fehler:', e.message); }
+    } catch(e) { console.error('Logo Fehler:', e.message); }
   } else if (srcWs._images?.length && srcWorkbook && dstWorkbook) {
     srcWs._images.forEach(img => {
       try {
@@ -194,7 +183,7 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
     ws.getCell(hmap.studio).value = `${gruppe.unternehmen||''} ${gruppe.standort||''}`.trim();
   }
   ws.getCell(hmap.termin).value     = termin;
-  ws.getCell(hmap.kunde).value      = kundenname || projektname; // BUG 1
+  ws.getCell(hmap.kunde).value      = kundenname || projektname;
   ws.getCell(hmap.zielgruppe).value = gruppe.zielgruppe || 'Allgemein';
   ws.getCell(hmap.projekt).value    = projektname;
   ws.getCell(hmap.projNr).value     = projektnummer;
@@ -222,7 +211,6 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
       hCell.note = `Quoten:\n${frage.quotenKommentar}`;
     }
 
-    // BUG 5: TN-Zeilen leeren + Rahmen setzen
     for (let r = TN_START; r <= TN_END; r++) {
       const tnCell     = ws.getCell(r, col);
       tnCell.value     = null;
