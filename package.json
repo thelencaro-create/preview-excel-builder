@@ -1,7 +1,7 @@
 {
   "name": "preview-excel-builder",
-  "version": "1.0.0",
-  "description": "Vercel Function – builds Excel preview files for the Preview Generator",
+  "version": "2.0.0",
+  "description": "Vercel Function – builds Excel preview files using templates",
   "type": "module",
   "dependencies": {
     "exceljs": "^4.4.0"
