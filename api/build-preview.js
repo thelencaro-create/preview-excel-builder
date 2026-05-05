@@ -202,6 +202,7 @@ function addConditionalFormats(ws) {
 }
 
 // Bug #4: Logo aus eingebettetem Base64 einfügen
+// Position: oben links, Größe pixelgenau aus logos.js (Aspect-Ratio bleibt erhalten)
 function addLogo(dstWs, dstWorkbook, unternehmen) {
   const logo = LOGOS[unternehmen];
   if (!logo?.base64 || logo.base64.startsWith('HIER_')) {
@@ -210,8 +211,8 @@ function addLogo(dstWs, dstWorkbook, unternehmen) {
   try {
     const logoId = dstWorkbook.addImage({ base64: logo.base64, extension: logo.ext });
     dstWs.addImage(logoId, {
-      tl: { col: 0, row: 0 },
-      br: { col: 3, row: 4 },
+      tl: { col: 0, row: 0 },                                              // obere linke Ecke A1
+      ext: { width: logo.width || 200, height: logo.height || 60 },         // feste Pixelgröße
       editAs: 'oneCell',
     });
   } catch (e) {
