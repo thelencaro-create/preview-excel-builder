@@ -125,6 +125,21 @@ function copyWorksheet(srcWs, dstWs) {
   // Stattdessen: addConditionalFormats() manuell aufrufen.
 }
 
+// Liest die erste "Quote"-Spalte direkt aus dem Template (Zeile 6).
+// Damit ist der Builder unabhängig von hardcoded Spalten-Indices:
+// Wo im Template "Quote 1" (oder "Quote ...") steht, dort starten die Fragen.
+// Wenn keine Quote-Zelle gefunden wird, fällt es auf den SHEET_CONFIG-Wert zurück.
+function findQuoteStartCol(ws, fallback) {
+  const row6 = ws.getRow(6);
+  let foundCol = null;
+  row6.eachCell({ includeEmpty: false }, (cell, colNum) => {
+    if (foundCol !== null) return;
+    const v = String(cell.value ?? '').trim();
+    if (/^Quote\b/i.test(v)) foundCol = colNum;
+  });
+  return foundCol || fallback;
+}
+
 // Bug #2 + #3: Bedingte Formatierung manuell sauber setzen
 //
 // Wichtig für saubere DXF-Erzeugung (sonst meckert Excel beim Öffnen):
@@ -224,10 +239,11 @@ function styleAnswer(cell, isScreenout) {
   cell.alignment = { wrapText: true, vertical: 'top' };
 }
 
-function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, setting, methode) {
-  const hmap   = HEADER_MAP[setting] || HEADER_MAP.offline;
-  const cfg    = SHEET_CONFIG[methode] || SHEET_CONFIG['GD'];
-  const termin = gruppe.termin || `${gruppe.datum || ''} ${gruppe.uhrzeit || ''}`.trim();
+function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, setting, methode, quoteStartColOverride) {
+  const hmap     = HEADER_MAP[setting] || HEADER_MAP.offline;
+  const cfg      = SHEET_CONFIG[methode] || SHEET_CONFIG['GD'];
+  const startCol = quoteStartColOverride || cfg.quoteStartCol;
+  const termin   = gruppe.termin || `${gruppe.datum || ''} ${gruppe.uhrzeit || ''}`.trim();
 
   // Header-Zellen
   if (hmap.studio) {
@@ -240,8 +256,6 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
   ws.getCell(hmap.projekt).value    = projektname;
   ws.getCell(hmap.projNr).value     = projektnummer;
   ws.getCell(hmap.incentive).value  = gruppe.incentive || '';
-
-  const startCol = cfg.quoteStartCol;
 
   // Fragen-Spalten aufbauen
   fragen.forEach((frage, fi) => {
@@ -348,8 +362,11 @@ export default async function handler(req, res) {
     const processGruppe = (gruppe, sheetName, fragenFG) => {
       const dstWs = result.addWorksheet(sheetName);
       copyWorksheet(srcWs, dstWs);
-      addConditionalFormats(dstWs);                           // Bug #2 + #3
-      addLogo(dstWs, result, gruppe.unternehmen);             // Bug #4
+      const methodeFG     = gruppe.methode || methode;
+      const cfgFG         = SHEET_CONFIG[methodeFG] || SHEET_CONFIG['GD'];
+      const quoteStartCol = findQuoteStartCol(dstWs, cfgFG.quoteStartCol);
+      addConditionalFormats(dstWs);                            // Bug #2 + #3
+      addLogo(dstWs, result, gruppe.unternehmen);              // Bug #4
       fillSheet(
         dstWs,
         gruppe,
@@ -358,9 +375,10 @@ export default async function handler(req, res) {
         projektname,
         auftraggeber,                                          // Bug #1
         setting,
-        gruppe.methode || methode,
+        methodeFG,
+        quoteStartCol,                                         // dynamisch aus Template
       );
-      newSheetNames.push(sheetName);
+      newSheetNames.push({ sheet: sheetName, quoteStartCol });
     };
 
     if (isIDI) {
@@ -379,23 +397,48 @@ export default async function handler(req, res) {
       }
     }
 
-    const buffer      = await result.xlsx.writeBuffer();
-    const excelBase64 = Buffer.from(buffer).toString('base64');
-    const dateiname   = `${projektnummer}_${projektname}_Preview.xlsx`
+    const buffer    = await result.xlsx.writeBuffer();
+    const dateiname = `${projektnummer}_${projektname}_Preview.xlsx`
       .replace(/[^a-zA-Z0-9_\-\.äöüÄÖÜß ]/g, '_');
 
+    // Upload zu Vercel Blob → liefert öffentliche Download-URL
+    // Fallback auf base64 falls Blob-Setup (noch) nicht da ist
+    let downloadUrl = null;
+    let excelBase64 = null;
+    let blobError   = null;
+
+    if (process.env.BLOB_READ_WRITE_TOKEN) {
+      try {
+        const { put } = await import('@vercel/blob');
+        const blob = await put(`previews/${dateiname}`, buffer, {
+          access: 'public',
+          contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+          addRandomSuffix: true, // verhindert Kollision bei gleichem Dateinamen
+        });
+        downloadUrl = blob.url;
+      } catch (e) {
+        console.error('Blob Upload fehlgeschlagen:', e.message);
+        blobError = e.message;
+        excelBase64 = Buffer.from(buffer).toString('base64');
+      }
+    } else {
+      excelBase64 = Buffer.from(buffer).toString('base64');
+    }
+
     return res.status(200).json({
-      excelBase64,
+      downloadUrl,                     // primärer Weg: Blob-URL für Form-Ending Redirect
+      excelBase64,                     // Fallback: nur gefüllt wenn Blob nicht verfügbar
       dateiname,
       success: true,
       debug: {
         fragenCount: fragenArr.length,
         gruppenCount: gruppen.length,
         sheets: newSheetNames,
-        quoteStartCol: cfg.quoteStartCol,
         setting,
         kundenname: auftraggeber,
-        bugfixes: ['kundenname', 'cf-spalte-a', 'cf-spalte-b', 'logo', 'rahmen'],
+        deliveryMode: downloadUrl ? 'blob' : 'base64',
+        blobError,
+        bugfixes: ['kundenname', 'cf-spalte-a', 'cf-spalte-b', 'logo', 'rahmen', 'dynamic-quote-start', 'blob-download'],
       },
     });
   } catch (err) {
