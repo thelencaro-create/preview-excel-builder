@@ -1,228 +1,212 @@
 import ExcelJS from "exceljs";
 
-// ── FARBEN ───────────────────────────────────────────────────────────────────
-const C = {
-  headerBg:   '1F4E79', headerFont: 'FFFFFF',
-  fragenBg:   '2E75B6', fragenFont: 'FFFFFF',
-  screenout:  'C00000', screenoutFg: 'FFFFFF',
-  adminBg:    'D9D9D9', lightBlue:  'D6E4F0',
-  lightGray:  'F2F2F2', white:      'FFFFFF',
-  dark:       '333333',
+// ── TEMPLATE KONFIGURATION ────────────────────────────────────────────────────
+const SHEET_CONFIG = {
+  GD:   { sheetName: 'GD',   quoteStartCol: 14 },
+  IDI:  { sheetName: 'IDIs', quoteStartCol: 16 },
+  VGD:  { sheetName: 'VGDs', quoteStartCol: 20 },
+  VDI:  { sheetName: 'VDIs', quoteStartCol: 22 },
 };
 
-function styleHeader(cell, bg, fg, bold = true) {
-  cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF' + bg } };
-  cell.font = { bold, color: { argb: 'FF' + fg }, name: 'Arial', size: 10 };
-  cell.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
-  cell.border = {
-    top: { style: 'thin' }, bottom: { style: 'thin' },
-    left: { style: 'thin' }, right: { style: 'thin' }
-  };
+const HEADER_MAP = {
+  offline: {
+    studio:     'H1',
+    termin:     ['L1','M1'],
+    kunde:      ['I2','J2'],
+    zielgruppe: ['L2','M2'],
+    projekt:    ['I3','J3'],
+    projNr:     ['I4','J4'],
+    incentive:  ['L4','M4'],
+  },
+  online: {
+    studio:     null,
+    termin:     ['M1','N1'],
+    kunde:      ['J1','K1'],
+    zielgruppe: ['J3','K3'],
+    projekt:    ['J2','K2'],
+    projNr:     ['J4','K4'],
+    incentive:  ['M4','N4'],
+  }
+};
+
+const TN_START_ROW = 7;
+const TN_END_ROW   = 16;
+const ANT_START_ROW = TN_END_ROW + 2;
+
+// ── HILFSFUNKTIONEN ───────────────────────────────────────────────────────────
+function setCellValue(ws, cellOrRange, value) {
+  if (Array.isArray(cellOrRange)) {
+    ws.getCell(cellOrRange[0]).value = value;
+  } else {
+    ws.getCell(cellOrRange).value = value;
+  }
 }
 
-function styleData(cell, bg = 'FFFFFF') {
-  cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF' + bg } };
-  cell.font = { name: 'Arial', size: 10 };
+function styleAnswerCell(cell, isScreenout) {
+  if (isScreenout) {
+    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFC00000' } };
+    cell.font = { bold: true, name: 'Arial', size: 9, color: { argb: 'FFFFFFFF' } };
+  } else {
+    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFFFFF' } };
+    cell.font = { name: 'Arial', size: 9, color: { argb: 'FF000000' } };
+  }
   cell.border = {
     top:    { style: 'thin', color: { argb: 'FFCCCCCC' } },
     bottom: { style: 'thin', color: { argb: 'FFCCCCCC' } },
     left:   { style: 'thin', color: { argb: 'FFCCCCCC' } },
-    right:  { style: 'thin', color: { argb: 'FFCCCCCC' } }
+    right:  { style: 'thin', color: { argb: 'FFCCCCCC' } },
   };
-  cell.alignment = { vertical: 'middle', wrapText: true };
+  cell.alignment = { wrapText: true, vertical: 'top' };
 }
 
-function buildSheet(ws, gruppe, fragenFuerGruppe, projektnummer, projektname, methode) {
-  const tn = gruppe.tnBrutto || 8;
-  const termin = gruppe.termin || `${gruppe.datum || ''} ${gruppe.uhrzeit || ''}`.trim();
+async function copySheet(workbook, sourceSheetName, newSheetName) {
+  const sourceWs = workbook.getWorksheet(sourceSheetName);
+  if (!sourceWs) throw new Error(`Sheet '${sourceSheetName}' not found in template`);
 
-  // Spaltenbreiten
-  const widths = { A:12, B:14, C:14, D:14, E:7, F:15, G:15, H:14, I:22, J:12, K:16, L:12, M:16 };
-  Object.entries(widths).forEach(([col, w]) => { ws.getColumn(col).width = w; });
+  const newWs = workbook.addWorksheet(newSheetName);
 
-  // ── HEADER BLOCK (Zeilen 1-4) ─────────────────────────────────────────────
-  const headerInfos = [
-    ['Studio:',     `${gruppe.unternehmen || ''} ${gruppe.standort || ''}`.trim()],
-    ['Termin:',     termin],
-    ['Kunde:',      projektname],
-    ['Zielgruppe:', gruppe.zielgruppe || 'Allgemein'],
-  ];
-  const rightLabels = [
-    `Proj.-Nr.: ${projektnummer}`,
-    `Incentive: ${gruppe.incentive || ''}`,
-    `Methode: ${gruppe.methode || methode}`,
-    '',
-  ];
+  sourceWs.columns.forEach((col, idx) => {
+    if (col.width) newWs.getColumn(idx + 1).width = col.width;
+  });
 
-  headerInfos.forEach(([label, value], i) => {
-    const row = i + 1;
-    ['A','B','C','D'].forEach(col => {
-      const cell = ws.getCell(`${col}${row}`);
-      cell.fill = { type:'pattern', pattern:'solid', fgColor:{ argb:'FF'+C.adminBg } };
-      cell.border = { top:{style:'thin'}, bottom:{style:'thin'}, left:{style:'thin'}, right:{style:'thin'} };
+  sourceWs.eachRow({ includeEmpty: true }, (row, rowNum) => {
+    const newRow = newWs.getRow(rowNum);
+    newRow.height = row.height;
+    row.eachCell({ includeEmpty: true }, (cell, colNum) => {
+      const newCell = newRow.getCell(colNum);
+      newCell.value = cell.value;
+      if (cell.style) {
+        try { newCell.style = JSON.parse(JSON.stringify(cell.style)); } catch(e) {}
+      }
+      if (cell.alignment) {
+        newCell.alignment = { ...cell.alignment };
+      }
     });
-    ws.mergeCells(`E${row}:G${row}`);
-    const lc = ws.getCell(`E${row}`);
-    lc.value = label;
-    lc.font = { bold:true, name:'Arial', size:10, color:{ argb:'FF'+C.headerBg } };
-    lc.fill = { type:'pattern', pattern:'solid', fgColor:{ argb:'FF'+C.lightBlue } };
-    lc.alignment = { vertical:'middle' };
-    lc.border = { top:{style:'thin'}, bottom:{style:'thin'}, left:{style:'thin'}, right:{style:'thin'} };
-
-    ws.mergeCells(`H${row}:L${row}`);
-    const vc = ws.getCell(`H${row}`);
-    vc.value = value;
-    vc.font = { name:'Arial', size:10 };
-    vc.fill = { type:'pattern', pattern:'solid', fgColor:{ argb:'FFFFFFFF' } };
-    vc.alignment = { vertical:'middle' };
-    vc.border = { top:{style:'thin'}, bottom:{style:'thin'}, left:{style:'thin'}, right:{style:'thin'} };
-
-    ws.mergeCells(`M${row}:N${row}`);
-    const rc = ws.getCell(`M${row}`);
-    rc.value = rightLabels[i];
-    rc.font = { bold:true, name:'Arial', size:9, color:{ argb:'FF'+C.headerBg } };
-    rc.fill = { type:'pattern', pattern:'solid', fgColor:{ argb:'FF'+C.lightBlue } };
-    rc.alignment = { vertical:'middle' };
-    rc.border = { top:{style:'thin'}, bottom:{style:'thin'}, left:{style:'thin'}, right:{style:'thin'} };
+    newRow.commit();
   });
 
-  // Leerzeile 5
-  ws.getRow(5).height = 6;
-
-  // ── SPALTEN-HEADER (Zeile 6) ──────────────────────────────────────────────
-  ws.getRow(6).height = 40;
-  const adminLabels = ['Freigabe','Projektabschluss','Feedback TN','Incentive final'];
-  ['A','B','C','D'].forEach((col, i) => {
-    const cell = ws.getCell(`${col}6`);
-    cell.value = adminLabels[i];
-    styleHeader(cell, C.adminBg, C.dark);
-  });
-
-  styleHeader(ws.getCell('E6'), C.headerBg, C.headerFont);
-  ws.getCell('E6').value = 'lfd. Nr.';
-
-  const personalien = ['Vorname','Nachname','Rufnummer','E-Mail','Reminder','Kommentar','Anonymität','letzte TN'];
-  ['F','G','H','I','J','K','L','M'].forEach((col, i) => {
-    const cell = ws.getCell(`${col}6`);
-    cell.value = personalien[i];
-    styleHeader(cell, C.headerBg, C.headerFont);
-  });
-
-  // Screener-Fragen ab Spalte N (=14)
-  const startCol = 14;
-  fragenFuerGruppe.forEach((frage, fi) => {
-    const colNum = startCol + fi;
-    const cell = ws.getCell(6, colNum);
-    cell.value = `${frage.id}. ${frage.fragetext}`;
-    styleHeader(cell, C.fragenBg, C.fragenFont);
-    ws.getColumn(colNum).width = 24;
-    if (frage.quotenKommentar) {
-      cell.note = { texts: [{ text: `Quoten:\n${frage.quotenKommentar}` }] };
-    }
-  });
-
-  // ── TN-ZEILEN ─────────────────────────────────────────────────────────────
-  for (let t = 0; t < tn; t++) {
-    const rowNum = 7 + t;
-    ws.getRow(rowNum).height = 20;
-    ['A','B','C','D'].forEach(col => styleData(ws.getCell(`${col}${rowNum}`), C.adminBg));
-    const lfd = ws.getCell(`E${rowNum}`);
-    lfd.value = t + 1;
-    styleData(lfd, C.lightBlue);
-    lfd.alignment = { horizontal:'center', vertical:'middle' };
-    ['F','G','H','I','J','K','L','M'].forEach(col => styleData(ws.getCell(`${col}${rowNum}`)));
-    fragenFuerGruppe.forEach((_, fi) => styleData(ws.getCell(rowNum, startCol + fi)));
+  if (sourceWs._merges) {
+    Object.keys(sourceWs._merges).forEach(key => {
+      try { newWs.mergeCells(key); } catch(e) {}
+    });
   }
 
-  // ── ANTWORT-REFERENZZEILEN ────────────────────────────────────────────────
-  const antStart = 7 + tn + 1;
-  ws.getRow(antStart - 1).height = 6;
-  const maxAntworten = Math.max(...fragenFuerGruppe.map(f => (f.antworten || []).length), 0);
+  if (sourceWs.dataValidations?.model) {
+    Object.entries(sourceWs.dataValidations.model).forEach(([sqref, dv]) => {
+      try { newWs.dataValidations.add(sqref, dv); } catch(e) {}
+    });
+  }
 
-  for (let a = 0; a < maxAntworten; a++) {
-    const rowNum = antStart + a;
-    ws.getRow(rowNum).height = 18;
-    if (a === 0) {
-      const lbl = ws.getCell(`E${rowNum}`);
-      lbl.value = 'Antworten:';
-      lbl.font = { bold:true, name:'Arial', size:9, color:{ argb:'FF'+C.headerBg } };
-      lbl.fill = { type:'pattern', pattern:'solid', fgColor:{ argb:'FF'+C.lightBlue } };
-      lbl.border = { top:{style:'thin'}, bottom:{style:'thin'}, left:{style:'thin'}, right:{style:'thin'} };
+  return newWs;
+}
+
+async function buildGroupSheet(workbook, templateSheetName, sheetName, gruppe, fragen, projektnummer, projektname, setting) {
+  const ws = await copySheet(workbook, templateSheetName, sheetName);
+
+  const termin = gruppe.termin || `${gruppe.datum || ''} ${gruppe.uhrzeit || ''}`.trim();
+  const hmap = setting === 'online' ? HEADER_MAP.online : HEADER_MAP.offline;
+
+  if (hmap.studio && gruppe.unternehmen) {
+    ws.getCell(hmap.studio).value = `${gruppe.unternehmen} ${gruppe.standort || ''}`.trim();
+  }
+  setCellValue(ws, hmap.termin,     termin);
+  setCellValue(ws, hmap.kunde,      projektname);
+  setCellValue(ws, hmap.zielgruppe, gruppe.zielgruppe || 'Allgemein');
+  setCellValue(ws, hmap.projekt,    projektname);
+  setCellValue(ws, hmap.projNr,     projektnummer);
+  setCellValue(ws, hmap.incentive,  gruppe.incentive || '');
+
+  const config = SHEET_CONFIG[gruppe.methode] || SHEET_CONFIG['GD'];
+  const startCol = config.quoteStartCol;
+
+  fragen.forEach((frage, fi) => {
+    const colNum = startCol + fi;
+    ws.getColumn(colNum).width = 22;
+
+    const headerCell = ws.getCell(6, colNum);
+    headerCell.value = `${frage.id}. ${frage.fragetext}`;
+    headerCell.font = { bold: true, name: 'Arial', size: 9, color: { argb: 'FF000000' } };
+    headerCell.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
+
+    if (frage.quotenKommentar) {
+      headerCell.note = `Quoten:\n${frage.quotenKommentar}`;
     }
-    fragenFuerGruppe.forEach((frage, fi) => {
+
+    for (let t = TN_START_ROW; t <= TN_END_ROW; t++) {
+      ws.getCell(t, colNum).value = null;
+    }
+  });
+
+  const maxAntworten = Math.max(...fragen.map(f => (f.antworten || []).length), 0);
+  for (let a = 0; a < maxAntworten; a++) {
+    const rowNum = ANT_START_ROW + a;
+    ws.getRow(rowNum).height = 14;
+    fragen.forEach((frage, fi) => {
+      const colNum = startCol + fi;
       const antwort = (frage.antworten || [])[a];
       if (!antwort) return;
-      const cell = ws.getCell(rowNum, startCol + fi);
+      const cell = ws.getCell(rowNum, colNum);
       cell.value = `${antwort.code} | ${antwort.text}`;
-      cell.font = {
-        name: 'Arial', size: 9, bold: !!antwort.screenout,
-        color: { argb: antwort.screenout ? 'FF'+C.screenoutFg : 'FF'+C.dark }
-      };
-      cell.fill = {
-        type: 'pattern', pattern: 'solid',
-        fgColor: { argb: antwort.screenout ? 'FF'+C.screenout : 'FF'+C.lightGray }
-      };
-      cell.border = {
-        top:{style:'thin',color:{argb:'FFCCCCCC'}}, bottom:{style:'thin',color:{argb:'FFCCCCCC'}},
-        left:{style:'thin',color:{argb:'FFCCCCCC'}}, right:{style:'thin',color:{argb:'FFCCCCCC'}}
-      };
-      cell.alignment = { wrapText: true, vertical: 'middle' };
+      styleAnswerCell(cell, !!antwort.screenout);
     });
   }
 
-  ws.views = [{ state: 'frozen', xSplit: 5, ySplit: 6 }];
+  // Alte Quote-Spalten leeren
+  for (let col = startCol + fragen.length; col <= startCol + 30; col++) {
+    const h = ws.getCell(6, col);
+    if (h.value && String(h.value).startsWith('Quote')) {
+      h.value = null;
+    } else break;
+  }
+
+  return ws;
 }
 
-// ── MAIN HANDLER ─────────────────────────────────────────────────────────────
+// ── MAIN HANDLER ──────────────────────────────────────────────────────────────
 export default async function handler(req, res) {
   try {
     if (req.method !== 'POST') {
       return res.status(405).json({ error: 'Method not allowed' });
     }
 
-    const {
-      templateBase64, projektnummer, projektname,
-      methode, isIDI, gruppen, fragen
-    } = req.body ?? {};
+    const { templateBase64, projektnummer, projektname, methode, isIDI, gruppen, fragen } = req.body ?? {};
 
-    if (!templateBase64) {
-      return res.status(400).json({ error: 'Missing templateBase64' });
-    }
+    if (!templateBase64) return res.status(400).json({ error: 'Missing templateBase64' });
+    if (!gruppen?.length) return res.status(400).json({ error: 'Missing gruppen' });
 
-    // Template laden
     const workbook = new ExcelJS.Workbook();
-    const templateBuffer = Buffer.from(templateBase64, 'base64');
-    await workbook.xlsx.load(templateBuffer);
+    await workbook.xlsx.load(Buffer.from(templateBase64, 'base64'));
 
-    // Alle alten Sheets entfernen
-    while (workbook.worksheets.length > 0) {
-      workbook.removeWorksheet(workbook.worksheets[0].id);
-    }
+    const setting = (methode === 'VGD' || methode === 'VDI') ? 'online' : 'offline';
+    const config  = SHEET_CONFIG[methode] || SHEET_CONFIG['GD'];
+
+    const newSheetNames = [];
 
     if (isIDI) {
-      const ws = workbook.addWorksheet('IDI');
-      const hauptGruppe = gruppen?.[0] || {
-        id: 'IDI', methode, standort: '', unternehmen: '',
-        datum: '', uhrzeit: '', termin: '', tnBrutto: 8,
-        incentive: '', zielgruppe: 'Allgemein'
-      };
-      buildSheet(ws, hauptGruppe, fragen || [], projektnummer, projektname, methode);
+      const hauptGruppe = { ...gruppen[0], methode };
+      const sheetName = methode === 'VDI' ? 'VDIs' : 'IDIs';
+      await buildGroupSheet(workbook, config.sheetName, sheetName, hauptGruppe, fragen, projektnummer, projektname, setting);
+      newSheetNames.push(sheetName);
     } else {
-      for (const gruppe of (gruppen || [])) {
-        const sheetName = (gruppe.id || 'GD1')
-          .replace(/[:\\/\?\*\[\]]/g, '')
-          .substring(0, 31);
-        const ws = workbook.addWorksheet(sheetName);
+      for (const gruppe of gruppen) {
+        gruppe.methode = gruppe.methode || methode;
+        const sheetName = gruppe.id.replace(/[:\\/\?\*\[\]]/g, '').substring(0, 31);
         const fragenFuerGruppe = (fragen || []).filter(f =>
           !f.relevantFuerGruppen ||
           f.relevantFuerGruppen.includes('alle') ||
           f.relevantFuerGruppen.includes(gruppe.id)
         );
-        buildSheet(ws, gruppe, fragenFuerGruppe, projektnummer, projektname, methode);
+        await buildGroupSheet(workbook, config.sheetName, sheetName, gruppe, fragenFuerGruppe, projektnummer, projektname, setting);
+        newSheetNames.push(sheetName);
       }
     }
 
-    // Excel als Buffer
+    // Template-Sheets entfernen
+    workbook.worksheets
+      .filter(ws => !newSheetNames.includes(ws.name))
+      .map(ws => ws.id)
+      .forEach(id => workbook.removeWorksheet(id));
+
     const buffer = await workbook.xlsx.writeBuffer();
     const excelBase64 = Buffer.from(buffer).toString('base64');
     const dateiname = `${projektnummer}_${projektname}_Preview.xlsx`
@@ -232,6 +216,6 @@ export default async function handler(req, res) {
 
   } catch (err) {
     console.error('preview-excel-builder error:', err);
-    return res.status(500).json({ error: String(err?.message || err) });
+    return res.status(500).json({ error: String(err?.message || err), stack: err?.stack });
   }
 }
