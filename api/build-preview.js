@@ -35,64 +35,17 @@ const ANT_START = TN_END + 2;
 
 const LOGO_BASE64 = ''; // <-- Base64-String des Logos einfügen
 
-// ── BEDINGTE FORMATIERUNG ─────────────────────────────────────────────────────
-// KEIN "priority", KEIN "font" in CF-Rules – beides erzeugt kaputtes XML in ExcelJS
-function addConditionalFormats(ws) {
-
-  ws.addConditionalFormatting({
-    ref: '$A$7:$A$16',
-    rules: [
-      { type: 'formula', formulae: ['=$A7="ausgeladen"'],
-        style: { fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFC00000' } } } },
-      { type: 'formula', formulae: ['=$A7="Ausfall, da kein Reminder"'],
-        style: { fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFC00000' } } } },
-      { type: 'formula', formulae: ['=$A7="Admin Freigabe"'],
-        style: { fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF70AD47' } } } },
-      { type: 'formula', formulae: ['=$A7="abgesagt"'],
-        style: { fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFF0000' } } } },
-      { type: 'formula', formulae: ['=$A7="Interviewer Freigabe"'],
-        style: { fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFFFC0' } } } },
-      { type: 'formula', formulae: ['=$A7="Ersatz"'],
-        style: { fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFA9D18E' } } } },
-      { type: 'formula', formulae: ['=$A7="Umterminierung"'],
-        style: { fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFB4C6E7' } } } },
-      { type: 'formula', formulae: ['=$A7="Umterminierung (Kunde)"'],
-        style: { fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFB4C6E7' } } } },
-      { type: 'formula', formulae: ['=$A7="onhold (nicht ins Update)"'],
-        style: { fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFED7D31' } } } },
-    ],
-  });
-
-  ws.addConditionalFormatting({
-    ref: '$B$7:$B$16',
-    rules: [
-      { type: 'formula', formulae: ['=$B7="teilgenommen"'],
-        style: { fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF70AD47' } } } },
-      { type: 'formula', formulae: ['=$B7="ausgezahlt"'],
-        style: { fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFA9D18E' } } } },
-      { type: 'formula', formulae: ['=$B7="kam zu spät ohne Ankündigung"'],
-        style: { fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF808080' } } } },
-      { type: 'formula', formulae: ['=$B7="kam zu spät mit Ankündigung"'],
-        style: { fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF808080' } } } },
-      { type: 'formula', formulae: ['=$B7="nicht erschienen"'],
-        style: { fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF595959' } } } },
-      { type: 'formula', formulae: ['=$B7="kurzfristig abgesagt"'],
-        style: { fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF595959' } } } },
-      { type: 'formula', formulae: ['=$B7="abgesagt durch Kunde"'],
-        style: { fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF595959' } } } },
-    ],
-  });
-}
-
 // ── SHEET KOPIEREN ────────────────────────────────────────────────────────────
 function copyWorksheet(srcWs, dstWs, srcWorkbook, dstWorkbook) {
 
+  // Spaltenbreiten
   srcWs.columns.forEach((col, i) => {
     const dstCol = dstWs.getColumn(i + 1);
     if (col.width)  dstCol.width  = col.width;
     if (col.hidden) dstCol.hidden = col.hidden;
   });
 
+  // Zeilen + Zellen
   srcWs.eachRow({ includeEmpty: true }, (srcRow, rn) => {
     const dstRow = dstWs.getRow(rn);
     if (srcRow.height) dstRow.height = srcRow.height;
@@ -110,20 +63,45 @@ function copyWorksheet(srcWs, dstWs, srcWorkbook, dstWorkbook) {
     dstRow.commit();
   });
 
+  // Merged cells
   if (srcWs._merges) {
     Object.keys(srcWs._merges).forEach(key => {
       try { dstWs.mergeCells(key); } catch(e) {}
     });
   }
 
+  // Dropdowns
   if (srcWs.dataValidations?.model) {
     Object.entries(srcWs.dataValidations.model).forEach(([sqref, dv]) => {
       try { dstWs.dataValidations.add(sqref, { ...dv }); } catch(e) {}
     });
   }
 
-  // CF wird NICHT kopiert → addConditionalFormats() setzt sie sauber neu.
+  // Bedingte Formatierung: aus Template kopieren, aber strikethrough entfernen
+  // (ExcelJS's addConditionalFormatting mit style-Objekten erzeugt kaputtes XML –
+  //  daher kopieren wir die Original-CF und bereinigen nur das strikethrough-Attribut)
+  if (srcWs.conditionalFormattings?.length) {
+    srcWs.conditionalFormattings.forEach(cf => {
+      try {
+        // Deep-clone damit wir das Original nicht verändern
+        const cfClean = JSON.parse(JSON.stringify(cf));
+        // strikethrough aus allen font-Objekten in den Rules entfernen
+        if (cfClean.rules) {
+          cfClean.rules.forEach(rule => {
+            if (rule.style?.font) {
+              delete rule.style.font.strikethrough;
+              delete rule.style.font.strike;
+            }
+          });
+        }
+        dstWs.addConditionalFormatting(cfClean);
+      } catch(e) {
+        console.error('CF copy Fehler:', e.message);
+      }
+    });
+  }
 
+  // Logo
   if (LOGO_BASE64) {
     try {
       const logoId = dstWorkbook.addImage({ base64: LOGO_BASE64, extension: 'png' });
@@ -183,7 +161,7 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
     ws.getCell(hmap.studio).value = `${gruppe.unternehmen||''} ${gruppe.standort||''}`.trim();
   }
   ws.getCell(hmap.termin).value     = termin;
-  ws.getCell(hmap.kunde).value      = kundenname || projektname;
+  ws.getCell(hmap.kunde).value      = kundenname || projektname; // BUG 1
   ws.getCell(hmap.zielgruppe).value = gruppe.zielgruppe || 'Allgemein';
   ws.getCell(hmap.projekt).value    = projektname;
   ws.getCell(hmap.projNr).value     = projektnummer;
@@ -211,6 +189,7 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
       hCell.note = `Quoten:\n${frage.quotenKommentar}`;
     }
 
+    // BUG 5: Rahmen in TN-Zeilen
     for (let r = TN_START; r <= TN_END; r++) {
       const tnCell     = ws.getCell(r, col);
       tnCell.value     = null;
@@ -296,7 +275,6 @@ export default async function handler(req, res) {
       const sheetName   = methode === 'VDI' ? 'VDIs' : 'IDIs';
       const dstWs       = result.addWorksheet(sheetName);
       copyWorksheet(srcWs, dstWs, template, result);
-      addConditionalFormats(dstWs);
       fillSheet(dstWs, hauptGruppe, fragenArr, projektnummer, projektname, auftraggeber, setting, methode);
       newSheetNames.push(sheetName);
 
@@ -311,7 +289,6 @@ export default async function handler(req, res) {
         );
         const dstWs = result.addWorksheet(sheetName);
         copyWorksheet(srcWs, dstWs, template, result);
-        addConditionalFormats(dstWs);
         fillSheet(dstWs, gruppe, fragenFG, projektnummer, projektname, auftraggeber, setting, gruppe.methode);
         newSheetNames.push(sheetName);
       }
