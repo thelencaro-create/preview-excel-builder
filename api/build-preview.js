@@ -65,16 +65,11 @@ const THIN_BORDER = {
 };
 
 // ---------------------------------------------------------------------------
-// 3) LOGOS – Base64 hart eingebettet (Bug #4)
-//    Hier die echten Base64-Strings einfügen. Bis dahin werden Logos
-//    übersprungen ohne den Build zu brechen.
+// 3) LOGOS – aus separater Datei geladen (Bug #4)
+//    Base64-Strings stehen in api/logos.js, damit dieser Builder schlank bleibt.
 // ---------------------------------------------------------------------------
 
-const LOGOS = {
-  'F&T': { base64: 'HIER_FT_BASE64', ext: 'png' },
-  'm-s': { base64: 'HIER_MS_BASE64', ext: 'jpg' },
-  'H+G': { base64: 'HIER_HG_BASE64', ext: 'jpg' },
-};
+import { LOGOS } from './logos.js';
 
 // ---------------------------------------------------------------------------
 // 4) HILFSFUNKTIONEN
