@@ -60,8 +60,8 @@ const ANT_OFFSET = 2;                  // Antworten beginnen TN_END + 2
 // ---------------------------------------------------------------------------
 
 const COLORS = {
-  DUNKELROT:   'FFC00000', // Screenout
-  HELLROT:     'FFF4CCCC', // Off-Target (außerhalb Zielgruppe der Gruppe)
+  DUNKELROT:   'FFC00000', // Screenout UND Off-Target (außerhalb Zielgruppe)
+  HELLROT:     'FFF4CCCC', // Reserve / nicht mehr aktiv genutzt
   GRUEN:       'FFA9D08E', // Quote-Hinweis
   HELLGRUEN:   'FFC6E0B4',
   HELLBLAU:    'FFBDD7EE',
@@ -71,9 +71,10 @@ const COLORS = {
   GRAU:        'FF808080',
   WEISS:       'FFFFFFFF',
   BORDER:      'FFCCCCCC',
-  MATRIX_HDR:  'FFDAE3F3', // zartes Blau für Matrix-Mutter-Header
+  THICK_BORDER: 'FF606060',  // dunkler Trenner zwischen Frage-Bereichen
+  MATRIX_HDR:  'FFE0E0E0',   // mittleres Grau für Matrix-Mutter-Header (vorher zartes Blau)
   HEADER_GREY: 'FFF2F2F2',
-  QUOTE_FONT:  'FF2E7D32', // dunkles Grün für Quote-Text
+  QUOTE_FONT:  'FF2E7D32',   // dunkles Grün für Quote-Text
 };
 
 const THIN_BORDER = {
@@ -89,6 +90,14 @@ const HEADER_BORDER = {
   left:   { style: 'thin', color: { argb: COLORS.BORDER } },
   right:  { style: 'thin', color: { argb: COLORS.BORDER } },
 };
+
+// Border-Variante mit dickem dunklem rechten Rand — markiert das Ende eines Fragen-Bereichs
+function borderWithThickRight(baseBorder) {
+  return {
+    ...baseBorder,
+    right: { style: 'medium', color: { argb: COLORS.THICK_BORDER } },
+  };
+}
 
 // ---------------------------------------------------------------------------
 // 3) HILFSFUNKTIONEN
@@ -255,22 +264,52 @@ function clearPrefilledTNCells(ws, tnEnd, quoteStartCol) {
 }
 
 // Cell-Styling für Antwort-Codes
+// Off-Target-Codes (außerhalb Zielgruppe) und Screenout-Codes haben jetzt
+// die gleiche Optik: dunkelroter Hintergrund, weiße fette Schrift.
 function styleAnswerCell(cell, ant, isOffTarget) {
   const screenout = !!ant.screenout;
   const offTarget = !screenout && isOffTarget;
+  const isRedHighlighted = screenout || offTarget;
   cell.value = `${ant.code} | ${ant.text}`;
   cell.fill = {
     type: 'pattern',
     pattern: 'solid',
-    fgColor: { argb: screenout ? COLORS.DUNKELROT : (offTarget ? COLORS.HELLROT : COLORS.WEISS) },
+    fgColor: { argb: isRedHighlighted ? COLORS.DUNKELROT : COLORS.WEISS },
   };
   cell.font = {
     name: 'Arial', size: 9,
-    bold: screenout,
-    color: { argb: screenout ? 'FFFFFFFF' : (offTarget ? 'FF9C0006' : 'FF000000') },
+    bold: isRedHighlighted,
+    color: { argb: isRedHighlighted ? 'FFFFFFFF' : 'FF000000' },
   };
   cell.border = { ...THIN_BORDER };
   cell.alignment = { wrapText: true, vertical: 'top' };
+}
+
+// Bereinigt Quote-Texte von Code-Syntax (z.B. "(F8.item2.code IN [1,2]) OR ...")
+// und erzeugt lesbaren Klartext. Wenn der Text nach dem Bereinigen leer wäre,
+// fällt die Funktion auf einen generischen Hinweis zurück.
+function cleanQuoteText(raw) {
+  if (!raw) return '';
+  let s = String(raw).trim();
+
+  // Wenn der Text Programmier-Syntax enthält (Klammern + IN/OR/AND/codes),
+  // ist er für den User unbrauchbar — kompletten Hinweis durch Klartext ersetzen.
+  const hasCodeSyntax = /\b(IN|AND|OR)\b\s*[\[\(]|\.code\b|\.item\d+\b/i.test(s);
+  if (hasCodeSyntax) {
+    return 'Quotenrelevant — siehe Mutterfrage-Hinweis (Hover auf Header)';
+  }
+
+  // Sonst: leichte Bereinigung von redundanten Pre-/Suffixen
+  s = s.replace(/^\s*ALLE\s+(müssen|sollen)\s+/i, 'Alle TN ');
+  s = s.replace(/\bCode\s+(\d)/gi, 'C$1');
+  s = s.replace(/\s+/g, ' ').trim();
+
+  // Wenn nicht schon mit "Quote" startet, vorne ergänzen
+  if (!/^quote/i.test(s)) {
+    s = 'Quote: ' + s;
+  }
+
+  return s;
 }
 
 // Off-Target-Erkennung pro Frage und Gruppe
@@ -300,15 +339,19 @@ function isAntOffTarget(frage, ant, gruppe) {
 }
 
 // Schreibt eine einzelne Frage-Spalte (oder Item-Spalte einer Matrix)
-function writeQuestionColumn(ws, col, label, note, antList, quoteText, tnEnd, gruppe, frage) {
+function writeQuestionColumn(ws, col, label, note, antList, quoteText, tnEnd, gruppe, frage, isLastInGroup) {
   ws.getColumn(col).width = 22;
+
+  // Border-Variante je nachdem ob diese Spalte das Ende einer Frage/Matrix ist
+  const cellBorder = isLastInGroup ? borderWithThickRight(THIN_BORDER) : { ...THIN_BORDER };
+  const headerBorder = isLastInGroup ? borderWithThickRight(HEADER_BORDER) : HEADER_BORDER;
 
   const h = ws.getCell(HEADER_ROW, col);
   h.value = label;
   h.font = { bold: true, name: 'Arial', size: 9, color: { argb: 'FF000000' } };
   h.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
-  h.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: COLORS.WEISS } };
-  h.border = HEADER_BORDER;
+  h.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: COLORS.HEADER_GREY } };
+  h.border = headerBorder;
   if (note) h.note = note;
 
   // TN-Zellen (genau brutto-Zeilen)
@@ -316,7 +359,7 @@ function writeQuestionColumn(ws, col, label, note, antList, quoteText, tnEnd, gr
     const c = ws.getCell(r, col);
     c.value = null;
     c.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: COLORS.WEISS } };
-    c.border = { ...THIN_BORDER };
+    c.border = cellBorder;
     c.alignment = { wrapText: true, vertical: 'top' };
   }
 
@@ -327,15 +370,20 @@ function writeQuestionColumn(ws, col, label, note, antList, quoteText, tnEnd, gr
       const offTarget = isAntOffTarget(frage, ant, gruppe);
       const cell = ws.getCell(row, col);
       styleAnswerCell(cell, ant, offTarget);
+      // Border ggf. mit dickem rechten Rand überschreiben
+      if (isLastInGroup) {
+        cell.border = borderWithThickRight(cell.border || THIN_BORDER);
+      }
       row++;
     }
-    // Quote-Hinweis (grün) als letzte Zeile
-    if (quoteText) {
+    // Quote-Hinweis (grün) als letzte Zeile — Text bereinigt von Code-Syntax
+    const cleanedQuote = cleanQuoteText(quoteText);
+    if (cleanedQuote) {
       const qc = ws.getCell(row, col);
-      qc.value = quoteText;
+      qc.value = cleanedQuote;
       qc.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: COLORS.GRUEN } };
       qc.font = { name: 'Arial', size: 9, bold: true, color: { argb: COLORS.QUOTE_FONT } };
-      qc.border = { ...THIN_BORDER };
+      qc.border = cellBorder;
       qc.alignment = { wrapText: true, vertical: 'top' };
     }
   }
@@ -417,8 +465,10 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
           screenout: a.screenout === true ? true :
                      (item.screenout_codes || []).includes(a.code),
         }));
+        // Letzte Item-Spalte einer Matrix bekommt dicken rechten Rand
+        const isLast = (item === frage.items[frage.items.length - 1]);
         writeQuestionColumn(ws, currentCol, item.item_label || '', itemNote,
-                            ants, itemQuote, tnEnd, gruppe, frage);
+                            ants, itemQuote, tnEnd, gruppe, frage, isLast);
         currentCol++;
       }
       const matrixEnd = currentCol - 1;
@@ -433,13 +483,13 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
       mh.font = { name: 'Arial', size: 10, bold: true };
       mh.alignment = { horizontal: 'center', vertical: 'center', wrapText: true };
       mh.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: COLORS.MATRIX_HDR } };
-      mh.border = HEADER_BORDER;
+      mh.border = borderWithThickRight(HEADER_BORDER);
       if (matrixQuoteText) mh.note = matrixQuoteText;
     } else if (frage.typ === 'freitext' || frage.typ === 'numerisch') {
       // Freitext / Numerisch: nur Header, keine Antwort-Codes
       const note = frage.bedingung ? `Bedingung: ${frage.bedingung}` : (frage.fragetext || '');
       const label = frage.id ? `${frage.id}. ${frage.kurzlabel || frage.fragetext || ''}`.substring(0, 60) : (frage.fragetext || '');
-      writeQuestionColumn(ws, currentCol, label, note, null, null, tnEnd, gruppe, frage);
+      writeQuestionColumn(ws, currentCol, label, note, null, null, tnEnd, gruppe, frage, true);
       currentCol++;
     } else {
       // single_choice, multi_choice, ranking
@@ -447,7 +497,7 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
       const note = frage.bedingung ? `Bedingung: ${frage.bedingung}` : '';
       const quoteText = frage.quotenkommentar || frage.bedingung || '';
       writeQuestionColumn(ws, currentCol, label, note,
-                          frage.antworten, quoteText, tnEnd, gruppe, frage);
+                          frage.antworten, quoteText, tnEnd, gruppe, frage, true);
       currentCol++;
     }
   }
@@ -456,8 +506,8 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
   ws.getRow(MATRIX_HEADER_ROW).height = 32;
   ws.getRow(HEADER_ROW).height = 75;
 
-  // Freeze Panes (Spalten A-E fix, ab Vorname F scrollt; Zeile 6 fix vertikal)
-  ws.views = [{ state: 'frozen', xSplit: 5, ySplit: 6 }];
+  // Freeze Panes komplett deaktiviert — User scrollt frei in alle Richtungen
+  ws.views = [{ state: 'normal' }];
 }
 
 // ---------------------------------------------------------------------------
