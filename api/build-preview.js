@@ -447,11 +447,19 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
   // 6) Fragen-Spalten aufbauen
   let currentCol = quoteStartCol;
   for (const frage of (fragen || [])) {
-    if (frage.typ === 'entfaellt') {
-      // Diese Frage wird übersprungen
+    // Sicherheitsnetz: Fragen mit kategorie='entfaellt' oder 'verfuegbarkeit'
+    // werden übersprungen, auch wenn typ noch single_choice ist.
+    if (frage.typ === 'entfaellt' || 
+        frage.kategorie === 'entfaellt' || 
+        frage.kategorie === 'verfuegbarkeit') {
       continue;
     }
-    if (frage.typ === 'matrix' && Array.isArray(frage.items) && frage.items.length) {
+    // Wenn typ='single_choice' aber items[] vorhanden ist (Parser-Inkonsistenz),
+    // behandle als Matrix.
+    const istEffektivMatrix = frage.typ === 'matrix' || 
+      (Array.isArray(frage.items) && frage.items.length > 0 && 
+       frage.items[0].antworten && frage.items[0].antworten.length > 0);
+    if (istEffektivMatrix && Array.isArray(frage.items) && frage.items.length) {
       // Matrix: pro Item eine Spalte + Mutter-Header in Zeile 5 gemerged
       // Quote-Text fällt zurück auf bedingung (Parser legt Quoten-Logik dort ab)
       const matrixQuoteText = frage.quotenkommentar || frage.bedingung || '';
