@@ -405,10 +405,12 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
     }
     if (frage.typ === 'matrix' && Array.isArray(frage.items) && frage.items.length) {
       // Matrix: pro Item eine Spalte + Mutter-Header in Zeile 5 gemerged
+      // Quote-Text fällt zurück auf bedingung (Parser legt Quoten-Logik dort ab)
+      const matrixQuoteText = frage.quotenkommentar || frage.bedingung || '';
       const matrixStart = currentCol;
       for (const item of frage.items) {
-        const itemNote = `MUTTERFRAGE: ${frage.fragetext || ''}\n\n${frage.quotenkommentar || ''}\n\n${item.note || ''}\n\n${item.marker ? 'Marker: ' + item.marker : ''}`.trim();
-        const itemQuote = item.quote_text || (item.is_quote_relevant && frage.quotenkommentar ? frage.quotenkommentar : '');
+        const itemNote = `MUTTERFRAGE: ${frage.fragetext || ''}\n\n${matrixQuoteText}\n\n${item.note || ''}\n\n${item.marker ? 'Marker: ' + item.marker : ''}`.trim();
+        const itemQuote = item.quote_text || (item.is_quote_relevant && matrixQuoteText ? matrixQuoteText : '');
         // Antworten pro Item: screenout wird aus item.screenout_codes berechnet wenn nicht direkt gesetzt
         const ants = (item.antworten || []).map(a => ({
           ...a,
@@ -432,7 +434,7 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
       mh.alignment = { horizontal: 'center', vertical: 'center', wrapText: true };
       mh.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: COLORS.MATRIX_HDR } };
       mh.border = HEADER_BORDER;
-      if (frage.quotenkommentar) mh.note = frage.quotenkommentar;
+      if (matrixQuoteText) mh.note = matrixQuoteText;
     } else if (frage.typ === 'freitext' || frage.typ === 'numerisch') {
       // Freitext / Numerisch: nur Header, keine Antwort-Codes
       const note = frage.bedingung ? `Bedingung: ${frage.bedingung}` : (frage.fragetext || '');
@@ -443,8 +445,9 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
       // single_choice, multi_choice, ranking
       const label = frage.id ? `${frage.id}. ${frage.fragetext || ''}` : (frage.fragetext || '');
       const note = frage.bedingung ? `Bedingung: ${frage.bedingung}` : '';
+      const quoteText = frage.quotenkommentar || frage.bedingung || '';
       writeQuestionColumn(ws, currentCol, label, note,
-                          frage.antworten, frage.quotenkommentar, tnEnd, gruppe, frage);
+                          frage.antworten, quoteText, tnEnd, gruppe, frage);
       currentCol++;
     }
   }
