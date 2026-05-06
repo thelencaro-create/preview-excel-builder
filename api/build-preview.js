@@ -466,7 +466,20 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
       const matrixStart = currentCol;
       for (const item of frage.items) {
         const itemNote = `MUTTERFRAGE: ${frage.fragetext || ''}\n\n${matrixQuoteText}\n\n${item.note || ''}\n\n${item.marker ? 'Marker: ' + item.marker : ''}`.trim();
-        const itemQuote = item.quote_text || (item.is_quote_relevant && matrixQuoteText ? matrixQuoteText : '');
+        // Quote-Text-Logik mit Auto-Fallback aus Marker:
+        // 1) explizit gesetzt → nehmen
+        // 2) Mutterfrage hat Quote-Text → übernehmen
+        // 3) Marker X/Y gesetzt aber kein expliziter Text → Auto-Hinweis generieren
+        let itemQuote = item.quote_text || '';
+        if (!itemQuote && item.is_quote_relevant && matrixQuoteText) {
+          itemQuote = matrixQuoteText;
+        }
+        if (!itemQuote && item.marker === 'X') {
+          itemQuote = 'Quotenrelevant: Item muss zutreffen (Marker X)';
+        }
+        if (!itemQuote && item.marker === 'Y') {
+          itemQuote = 'Quotenrelevant: Item darf NICHT zutreffen (Marker Y)';
+        }
         // Antworten pro Item: screenout wird aus item.screenout_codes berechnet wenn nicht direkt gesetzt
         const ants = (item.antworten || []).map(a => ({
           ...a,
@@ -503,7 +516,16 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
       // single_choice, multi_choice, ranking
       const label = frage.id ? `${frage.id}. ${frage.fragetext || ''}` : (frage.fragetext || '');
       const note = frage.bedingung ? `Bedingung: ${frage.bedingung}` : '';
-      const quoteText = frage.quotenkommentar || frage.bedingung || '';
+      let quoteText = frage.quotenkommentar || frage.bedingung || '';
+      // Auto-Quote-Hinweis für F1 (Geschlecht) und F2 (Alter) aus Gruppen-Daten
+      if (!quoteText) {
+        const ftLower = (frage.fragetext || '').toLowerCase();
+        if (ftLower.includes('geschlecht') && gruppe.geschlecht && gruppe.geschlecht !== 'gemischt') {
+          quoteText = `Quote: nur ${gruppe.geschlecht}`;
+        } else if ((ftLower.includes('alt sind') || ftLower.includes('alter')) && gruppe.alter_min && gruppe.alter_max) {
+          quoteText = `Quote: ${gruppe.alter_min}-${gruppe.alter_max} Jahre`;
+        }
+      }
       writeQuestionColumn(ws, currentCol, label, note,
                           frage.antworten, quoteText, tnEnd, gruppe, frage, true);
       currentCol++;
