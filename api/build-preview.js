@@ -198,7 +198,7 @@ function addConditionalFormats(ws, tnEnd) {
       cfRule(`$B${TN_START}="kam zu spät mit Ankündigung"`,  COLORS.GRAU, { fontColor: 'FFFFFFFF' }),
       cfRule(`$B${TN_START}="kurzfristig abgesagt"`,         COLORS.GRAU, { fontColor: 'FFFFFFFF' }),
       cfRule(`$B${TN_START}="abgesagt durch Kunde"`,         COLORS.GRAU, { fontColor: 'FFFFFFFF' }),
-    ],
+      ],
   });
 }
 
@@ -533,7 +533,7 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
   }
 
   // Höhere Zeilen für Matrix-Header und Frage-Header
-  ws.getRow(MATRIX_HEADER_ROW).height = 32;
+ws.getRow(MATRIX_HEADER_ROW).height = 32;
   ws.getRow(HEADER_ROW).height = 75;
 
   // Freeze Panes komplett deaktiviert — User scrollt frei in alle Richtungen
@@ -658,7 +658,7 @@ export default async function handler(req, res) {
         kundenname: auftraggeber,
         deliveryMode: downloadUrl ? 'blob' : 'base64',
         blobError,
-        version: 'v2-matrix-schema',
+        version: 'v3-auto-quote-hints',
       },
     });
   } catch (err) {
