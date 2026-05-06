@@ -194,19 +194,38 @@ function addConditionalFormats(ws, tnEnd) {
 }
 
 // Logo aus logos.js einfügen
-function addLogo(dstWs, dstWorkbook, unternehmen) {
+// WICHTIG: Position pro Setting unterschiedlich, weil offline und online Templates
+// das Logo in unterschiedlichen Spalten haben.
+function addLogo(dstWs, dstWorkbook, unternehmen, setting) {
   const logo = LOGOS[unternehmen];
   if (!logo?.base64 || logo.base64.startsWith('HIER_')) return;
   try {
     const logoId = dstWorkbook.addImage({ base64: logo.base64, extension: logo.ext });
+    // Offline: Spalten E-H (Index 4-7), Online: Spalten F-H (Index 5-7)
+    const startCol = (setting === 'online') ? 5 : 4;
     dstWs.addImage(logoId, {
-      tl: { col: 0, row: 0 },
+      tl: { col: startCol, row: 0 },
       ext: { width: logo.width || 200, height: logo.height || 60 },
       editAs: 'oneCell',
     });
   } catch (e) {
     console.error('Logo Fehler:', e.message);
   }
+}
+
+// Findet dynamisch die "lfd. Nr."-Spalte im Template (Zeile 6).
+// Offline = Spalte E (5), Online = Spalte F (6) — variiert je nach Template.
+function findLfdNrCol(ws, fallback) {
+  const row6 = ws.getRow(HEADER_ROW);
+  let foundCol = null;
+  row6.eachCell({ includeEmpty: false }, (cell, colNum) => {
+    if (foundCol !== null) return;
+    const v = String(cell.value ?? '').trim().toLowerCase();
+    if (v === 'lfd. nr.' || v === 'lfd.nr.' || v === 'lfd nr.' || v.startsWith('lfd')) {
+      foundCol = colNum;
+    }
+  });
+  return foundCol || fallback;
 }
 
 // Tracking-Bereich aufräumen: Zeilen TN_END+1 bis ca. 30 in Spalten 1..QUOTE_START-1 leeren
@@ -332,7 +351,8 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
   const netto = gruppe.netto || 6;
   const tnEnd = TN_START + brutto - 1;
   const labelRow = tnEnd + QUOTE_HINT_AFTER_TN_OFFSET;
-  const lfdCol = 5;
+  // lfd. Nr. Spalte dynamisch erkennen — offline = E (5), online = F (6)
+  const lfdCol = findLfdNrCol(ws, setting === 'online' ? 6 : 5);
 
   // 1) Vorbefüllte Tracking-Werte aus Template leeren
   clearPrefilledTNCells(ws, tnEnd, quoteStartCol);
@@ -492,7 +512,7 @@ export default async function handler(req, res) {
       const tnEnd = TN_START + brutto - 1;
 
       addConditionalFormats(dstWs, tnEnd);
-      addLogo(dstWs, result, gruppe.unternehmen);
+      addLogo(dstWs, result, gruppe.unternehmen, setting);
       fillSheet(
         dstWs, gruppe, fragenFG, projektnummer, projektname,
         auftraggeber, setting, methodeFG, quoteStartCol
