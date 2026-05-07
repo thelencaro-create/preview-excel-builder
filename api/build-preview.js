@@ -1,22 +1,7 @@
 // api/build-preview.js
-// Preview Generator – Excel Builder v2 (Schema mit Matrix/Freitext-Support)
-//
-// Layout-Konzept:
-//   Z1-4:    Header (Studio, Kunde, Projekt) — aus Template
-//   Z5:      Matrix-Mutter-Header (gemerged über alle Item-Spalten einer Matrix)
-//   Z6:      Frage-Header / Item-Sub-Header
-//   Z7..N:   TN-Eintragszeilen (N = brutto, dynamisch)
-//   ZN+1:    "X für Y"-Label in Spalte E (lfd. Nr.)
-//   ZN+2..:  Antwort-Codes (Screenout = dunkelrot, Off-Target = hellrot, Quote = grün)
-//
-// Tracking-Spalten (A bis QUOTE_START-1) bekommen ab Zeile N+1 keinen Inhalt mehr
-// und werden visuell sauber abgeschlossen.
+// Preview Generator – Excel Builder v6 (Schema mit Matrix/Freitext-Support)
 import ExcelJS from "exceljs";
 import { LOGOS } from './logos.js';
-
-// ---------------------------------------------------------------------------
-// 1) KONFIGURATION
-// ---------------------------------------------------------------------------
 
 const SHEET_CONFIG = {
   GD:  { sheetName: 'GD',   quoteStartCol: 14 },
@@ -25,20 +10,19 @@ const SHEET_CONFIG = {
   VDI: { sheetName: 'VDIs', quoteStartCol: 22 },
 };
 
-// Header-Zellen je Setting (offline = GD/IDI, online = VGD/VDI)
 const HEADER_MAP = {
   offline: {
-    studioLabel: 'H1',  // "F&T Standort"
-    studioWert:  'I1',  // "Bochum"
-    terminLabel: 'L1', terminWert: 'L1',  // im offline kein Label, Wert direkt
-    kunde:       'I2',  // "Psyma"
+    studioLabel: 'H1',
+    studioWert:  'I1',
+    terminLabel: 'L1', terminWert: 'L1',
+    kunde:       'I2',
     zielgruppe:  'L2',
     projekt:     'I3',
     projNr:      'I4',
     incentive:   'L4',
   },
   online: {
-    studioLabel: null,  // online kein Studio
+    studioLabel: null,
     studioWert:  null,
     terminLabel: 'L1', terminWert: 'M1',
     kunde:       'J1',
@@ -52,17 +36,13 @@ const HEADER_MAP = {
 const TN_START = 7;
 const MATRIX_HEADER_ROW = 5;
 const HEADER_ROW = 6;
-const QUOTE_HINT_AFTER_TN_OFFSET = 1;  // "X für Y"-Label = TN_END + 1
-const ANT_OFFSET = 3;                  // Antworten beginnen TN_END + 3 (Lücke zwischen TN und Codes)
-
-// ---------------------------------------------------------------------------
-// 2) FARBEN
-// ---------------------------------------------------------------------------
+const QUOTE_HINT_AFTER_TN_OFFSET = 1;
+const ANT_OFFSET = 3;
 
 const COLORS = {
-  DUNKELROT:   'FFC00000', // Screenout UND Off-Target (außerhalb Zielgruppe)
-  HELLROT:     'FFF4CCCC', // Reserve / nicht mehr aktiv genutzt
-  GRUEN:       'FFA9D08E', // Quote-Hinweis
+  DUNKELROT:   'FFC00000',
+  HELLROT:     'FFF4CCCC',
+  GRUEN:       'FFA9D08E',
   HELLGRUEN:   'FFC6E0B4',
   HELLBLAU:    'FFBDD7EE',
   GELB:        'FFFFE699',
@@ -71,10 +51,10 @@ const COLORS = {
   GRAU:        'FF808080',
   WEISS:       'FFFFFFFF',
   BORDER:      'FFCCCCCC',
-  THICK_BORDER: 'FF606060',  // dunkler Trenner zwischen Frage-Bereichen
-  MATRIX_HDR:  'FFE0E0E0',   // mittleres Grau für Matrix-Mutter-Header (vorher zartes Blau)
+  THICK_BORDER: 'FF606060',
+  MATRIX_HDR:  'FFE0E0E0',
   HEADER_GREY: 'FFF2F2F2',
-  QUOTE_FONT:  'FF2E7D32',   // dunkles Grün für Quote-Text
+  QUOTE_FONT:  'FF2E7D32',
 };
 
 const THIN_BORDER = {
@@ -91,7 +71,6 @@ const HEADER_BORDER = {
   right:  { style: 'thin', color: { argb: COLORS.BORDER } },
 };
 
-// Border-Variante mit dickem dunklem rechten Rand — markiert das Ende eines Fragen-Bereichs
 function borderWithThickRight(baseBorder) {
   return {
     ...baseBorder,
@@ -99,17 +78,12 @@ function borderWithThickRight(baseBorder) {
   };
 }
 
-// ---------------------------------------------------------------------------
-// 3) HILFSFUNKTIONEN
-// ---------------------------------------------------------------------------
-
 function copyWorksheet(srcWs, dstWs) {
   srcWs.columns.forEach((col, i) => {
     const dstCol = dstWs.getColumn(i + 1);
     if (col.width)  dstCol.width  = col.width;
     if (col.hidden) dstCol.hidden = col.hidden;
   });
-
   srcWs.eachRow({ includeEmpty: true }, (srcRow, rn) => {
     const dstRow = dstWs.getRow(rn);
     if (srcRow.height) dstRow.height = srcRow.height;
@@ -125,13 +99,11 @@ function copyWorksheet(srcWs, dstWs) {
     });
     dstRow.commit();
   });
-
   if (srcWs._merges) {
     Object.keys(srcWs._merges).forEach(key => {
       try { dstWs.mergeCells(key); } catch (e) {}
     });
   }
-
   if (srcWs.dataValidations?.model) {
     Object.entries(srcWs.dataValidations.model).forEach(([sqref, dv]) => {
       try { dstWs.dataValidations.add(sqref, { ...dv }); } catch (e) {}
@@ -139,7 +111,6 @@ function copyWorksheet(srcWs, dstWs) {
   }
 }
 
-// Findet die erste "Quote"-Spalte in Zeile 6 dynamisch
 function findQuoteStartCol(ws, fallback) {
   const row6 = ws.getRow(HEADER_ROW);
   let foundCol = null;
@@ -151,7 +122,6 @@ function findQuoteStartCol(ws, fallback) {
   return foundCol || fallback;
 }
 
-// Bedingte Formatierung Spalte A + B (sauber ohne Repair-Warnings)
 function addConditionalFormats(ws, tnEnd) {
   let prio = 1;
   const cfRule = (formula, fillArgb, opts = {}) => {
@@ -170,8 +140,6 @@ function addConditionalFormats(ws, tnEnd) {
     }
     return rule;
   };
-
-  // Spalte A — Freigabe-Status
   ws.addConditionalFormatting({
     ref: `A${TN_START}:A${tnEnd}`,
     rules: [
@@ -186,7 +154,6 @@ function addConditionalFormats(ws, tnEnd) {
       cfRule(`$A${TN_START}="Umterminierung (Kunde)"`,    COLORS.HELLBLAU),
     ],
   });
-  // Spalte B — Projektabschluss
   ws.addConditionalFormatting({
     ref: `B${TN_START}:B${tnEnd}`,
     rules: [
@@ -201,15 +168,11 @@ function addConditionalFormats(ws, tnEnd) {
   });
 }
 
-// Logo aus logos.js einfügen
-// WICHTIG: Position pro Setting unterschiedlich, weil offline und online Templates
-// das Logo in unterschiedlichen Spalten haben.
 function addLogo(dstWs, dstWorkbook, unternehmen, setting) {
   const logo = LOGOS[unternehmen];
   if (!logo?.base64 || logo.base64.startsWith('HIER_')) return;
   try {
     const logoId = dstWorkbook.addImage({ base64: logo.base64, extension: logo.ext });
-    // Offline: Spalten E-H (Index 4-7), Online: Spalten F-H (Index 5-7)
     const startCol = (setting === 'online') ? 5 : 4;
     dstWs.addImage(logoId, {
       tl: { col: startCol, row: 0 },
@@ -221,8 +184,6 @@ function addLogo(dstWs, dstWorkbook, unternehmen, setting) {
   }
 }
 
-// Findet dynamisch die "lfd. Nr."-Spalte im Template (Zeile 6).
-// Offline = Spalte E (5), Online = Spalte F (6) — variiert je nach Template.
 function findLfdNrCol(ws, fallback) {
   const row6 = ws.getRow(HEADER_ROW);
   let foundCol = null;
@@ -236,7 +197,6 @@ function findLfdNrCol(ws, fallback) {
   return foundCol || fallback;
 }
 
-// Tracking-Bereich aufräumen: Zeilen TN_END+1 bis ca. 30 in Spalten 1..QUOTE_START-1 leeren
 function clearTrackingArea(ws, tnEnd, quoteStartCol) {
   for (let r = tnEnd + 1; r <= 30; r++) {
     for (let col = 1; col < quoteStartCol; col++) {
@@ -250,21 +210,15 @@ function clearTrackingArea(ws, tnEnd, quoteStartCol) {
   }
 }
 
-// Vorbefüllte TN-Zeilen aus Template entfernen (z.B. "1..10" in Spalte E, "Admin Freigabe" in A7)
 function clearPrefilledTNCells(ws, tnEnd, quoteStartCol) {
   for (let r = TN_START; r <= 30; r++) {
     for (let col = 1; col < quoteStartCol; col++) {
       const c = ws.getCell(r, col);
-      // Alle Werte in Spalten links der Quotes leeren — diese werden später
-      // entweder neu befüllt (lfd. Nr.) oder bleiben leer (Vorname, etc.)
       c.value = null;
     }
   }
 }
 
-// Cell-Styling für Antwort-Codes
-// Off-Target-Codes (außerhalb Zielgruppe) und Screenout-Codes haben jetzt
-// die gleiche Optik: dunkelroter Hintergrund, weiße fette Schrift.
 function styleAnswerCell(cell, ant, isOffTarget) {
   const screenout = !!ant.screenout;
   const offTarget = !screenout && isOffTarget;
@@ -284,47 +238,29 @@ function styleAnswerCell(cell, ant, isOffTarget) {
   cell.alignment = { wrapText: true, vertical: 'top' };
 }
 
-// Bereinigt Quote-Texte von Code-Syntax (z.B. "(F8.item2.code IN [1,2]) OR ...")
-// und erzeugt lesbaren Klartext. Wenn der Text nach dem Bereinigen leer wäre,
-// fällt die Funktion auf einen generischen Hinweis zurück.
 function cleanQuoteText(raw) {
   if (!raw) return '';
   let s = String(raw).trim();
-
-  // Wenn der Text Programmier-Syntax enthält (Klammern + IN/OR/AND/codes),
-  // ist er für den User unbrauchbar — kompletten Hinweis durch Klartext ersetzen.
   const hasCodeSyntax = /\b(IN|AND|OR)\b\s*[\[\(]|\.code\b|\.item\d+\b/i.test(s);
   if (hasCodeSyntax) {
     return 'Quotenrelevant — siehe Mutterfrage-Hinweis (Hover auf Header)';
   }
-
-  // Sonst: leichte Bereinigung von redundanten Pre-/Suffixen
   s = s.replace(/^\s*ALLE\s+(müssen|sollen)\s+/i, 'Alle TN ');
   s = s.replace(/\bCode\s+(\d)/gi, 'C$1');
   s = s.replace(/\s+/g, ' ').trim();
-
-  // Wenn nicht schon mit "Quote" startet, vorne ergänzen
   if (!/^quote/i.test(s)) {
     s = 'Quote: ' + s;
   }
-
   return s;
 }
 
-// Off-Target-Erkennung pro Frage und Gruppe
-// Markiert Antwort-Codes als off_target wenn sie nicht zur Zielgruppe der Gruppe passen
-// (z.B. "weiblich" in einer Männer-Gruppe, oder "47-50" in einer 35-46-Gruppe)
 function isAntOffTarget(frage, ant, gruppe) {
   const ftLower = (frage.fragetext || '').toLowerCase();
   const antLower = (ant.text || '').toLowerCase();
-
-  // Geschlecht
   if (ftLower.match(/geschlecht/)) {
     if (gruppe.geschlecht === 'männlich' && antLower.match(/weiblich/)) return true;
     if (gruppe.geschlecht === 'weiblich' && antLower.match(/männlich/)) return true;
   }
-
-  // Alter — versuche Range im Text zu erkennen "35-38", "47-50"
   if (ftLower.match(/alt|alter/) && gruppe.alter_min && gruppe.alter_max) {
     const m = ant.text.match(/(\d{2})\s*[-–]\s*(\d{2})/);
     if (m) {
@@ -333,18 +269,13 @@ function isAntOffTarget(frage, ant, gruppe) {
       if (hi < gruppe.alter_min || lo > gruppe.alter_max) return true;
     }
   }
-
   return false;
 }
 
-// Schreibt eine einzelne Frage-Spalte (oder Item-Spalte einer Matrix)
 function writeQuestionColumn(ws, col, label, note, antList, quoteText, tnEnd, gruppe, frage, isLastInGroup) {
   ws.getColumn(col).width = 22;
-
-  // Border-Variante je nachdem ob diese Spalte das Ende einer Frage/Matrix ist
   const cellBorder = isLastInGroup ? borderWithThickRight(THIN_BORDER) : { ...THIN_BORDER };
   const headerBorder = isLastInGroup ? borderWithThickRight(HEADER_BORDER) : HEADER_BORDER;
-
   const h = ws.getCell(HEADER_ROW, col);
   h.value = label;
   h.font = { bold: true, name: 'Arial', size: 9, color: { argb: 'FF000000' } };
@@ -352,9 +283,6 @@ function writeQuestionColumn(ws, col, label, note, antList, quoteText, tnEnd, gr
   h.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: COLORS.HEADER_GREY } };
   h.border = headerBorder;
   if (note) h.note = note;
-
-  // TN-Zellen (genau brutto-Zeilen)
-  // Letzte TN-Zeile bekommt dickere schwarze Bottom-Border (visueller Abschluss TN-Bereich)
   const blackBottom = { style: 'medium', color: { argb: 'FF000000' } };
   for (let r = TN_START; r <= tnEnd; r++) {
     const c = ws.getCell(r, col);
@@ -371,16 +299,18 @@ function writeQuestionColumn(ws, col, label, note, antList, quoteText, tnEnd, gr
     }
     c.alignment = { wrapText: true, vertical: 'top' };
   }
-
-  // Antwort-Codes
   let row = tnEnd + ANT_OFFSET;
   if (antList && antList.length) {
     for (const ant of antList) {
       const offTarget = isAntOffTarget(frage, ant, gruppe);
       const cell = ws.getCell(row, col);
       styleAnswerCell(cell, ant, offTarget);
-      // Quote-Hinweis (grün) als letzte Zeile — auch wenn keine Antworten existieren
-  // Text bereinigt von Code-Syntax
+      if (isLastInGroup) {
+        cell.border = borderWithThickRight(cell.border || THIN_BORDER);
+      }
+      row++;
+    }
+  }
   const cleanedQuote = cleanQuoteText(quoteText);
   if (cleanedQuote) {
     const qc = ws.getCell(row, col);
@@ -392,23 +322,14 @@ function writeQuestionColumn(ws, col, label, note, antList, quoteText, tnEnd, gr
   }
 }
 
-// ---------------------------------------------------------------------------
-// 4) HAUPT-FILL-LOGIK
-// ---------------------------------------------------------------------------
-
 function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, setting, methode, quoteStartCol) {
   const hmap = HEADER_MAP[setting] || HEADER_MAP.offline;
   const brutto = gruppe.brutto || 8;
   const netto = gruppe.netto || 6;
   const tnEnd = TN_START + brutto - 1;
   const labelRow = tnEnd + QUOTE_HINT_AFTER_TN_OFFSET;
-  // lfd. Nr. Spalte dynamisch erkennen — offline = E (5), online = F (6)
   const lfdCol = findLfdNrCol(ws, setting === 'online' ? 6 : 5);
-
-  // 1) Vorbefüllte Tracking-Werte aus Template leeren
   clearPrefilledTNCells(ws, tnEnd, quoteStartCol);
-
-  // 2) Header befüllen
   if (hmap.studioLabel) {
     ws.getCell(hmap.studioLabel).value = 'F&T Standort';
   }
@@ -421,9 +342,6 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
   ws.getCell(hmap.projekt).value        = projektname;
   ws.getCell(hmap.projNr).value         = projektnummer;
   ws.getCell(hmap.incentive).value      = gruppe.incentive || '';
-
-  // Header-Werte zentriert ausrichten (m-s und H+G Templates haben standardmäßig links,
-  // F&T zentriert — wir vereinheitlichen auf Center)
   const headerValueCells = [
     hmap.terminWert, hmap.kunde, hmap.zielgruppe,
     hmap.projekt, hmap.projNr, hmap.incentive,
@@ -435,69 +353,55 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
   if (hmap.studioWert) {
     ws.getCell(hmap.studioWert).alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
   }
-
-  // 3) lfd. Nr. neu setzen + "X für Y"-Label
-  // Letzte TN-Zeile auch in lfd-Nr-Spalte mit dicker Bottom-Border abschließen
   const lfdHeader = ws.getCell(HEADER_ROW, lfdCol);
   lfdHeader.note = `Brutto: ${brutto} TN\nNetto: ${netto} TN\n→ ${brutto} für ${netto}`;
+  const blackBottom = { style: 'medium', color: { argb: 'FF000000' } };
   for (let r = TN_START; r <= tnEnd; r++) {
     const c = ws.getCell(r, lfdCol);
     c.value = r - TN_START + 1;
     c.alignment = { horizontal: 'center', vertical: 'center' };
     c.font = { name: 'Arial', size: 10, bold: true };
     if (r === tnEnd) {
-      const existingBorder = c.border || {};
-      c.border = { ...existingBorder, bottom: { style: 'medium', color: { argb: 'FF000000' } } };
+      const eb = c.border || {};
+      c.border = {
+        top: eb.top, left: eb.left, right: eb.right,
+        bottom: blackBottom,
+      };
     }
   }
-  // Auch Tracking-Spalten links der lfd. Nr. mit dicker Abschlusslinie versehen
   for (let col = 1; col < quoteStartCol; col++) {
     const c = ws.getCell(tnEnd, col);
-    const existingBorder = c.border || {};
-    c.border = { ...existingBorder, bottom: { style: 'medium', color: { argb: 'FF000000' } } };
+    const eb = c.border || {};
+    c.border = {
+      top: eb.top, left: eb.left, right: eb.right,
+      bottom: blackBottom,
+    };
   }
-
   const lblCell = ws.getCell(labelRow, lfdCol);
   lblCell.value = `${brutto} für ${netto}`;
   lblCell.font = { name: 'Arial', size: 9, bold: true, italic: true, color: { argb: COLORS.QUOTE_FONT } };
   lblCell.alignment = { horizontal: 'center', vertical: 'center' };
-
-  // 4) Tracking-Bereich rechts und unter TN ausnullen
   clearTrackingArea(ws, tnEnd, quoteStartCol);
-
-  // 5) Quote-N-Reste in Header-Zeile leeren
   for (let col = quoteStartCol; col <= quoteStartCol + 30; col++) {
     const c = ws.getCell(HEADER_ROW, col);
     if (c.value && /^Quote/i.test(String(c.value))) {
       c.value = null;
     }
   }
-
-  // 6) Fragen-Spalten aufbauen
   let currentCol = quoteStartCol;
   for (const frage of (fragen || [])) {
-    // Sicherheitsnetz: Fragen mit kategorie='entfaellt' oder 'verfuegbarkeit'
-    // werden übersprungen, auch wenn typ noch single_choice ist.
-    if (frage.typ === 'entfaellt' || 
-        frage.kategorie === 'entfaellt' || 
+    if (frage.typ === 'entfaellt' ||
+        frage.kategorie === 'entfaellt' ||
         frage.kategorie === 'verfuegbarkeit') {
       continue;
     }
-    // Wenn typ='single_choice' aber items[] vorhanden ist (Parser-Inkonsistenz),
-    // behandle als Matrix.
-    const istEffektivMatrix = frage.typ === 'matrix' || 
-      (Array.isArray(frage.items) && frage.items.length > 0 && 
+    const istEffektivMatrix = frage.typ === 'matrix' ||
+      (Array.isArray(frage.items) && frage.items.length > 0 &&
        frage.items[0].antworten && frage.items[0].antworten.length > 0);
     if (istEffektivMatrix && Array.isArray(frage.items) && frage.items.length) {
-      // Matrix: pro Item eine Spalte + Mutter-Header in Zeile 5 gemerged
-      // Quote-Text fällt zurück auf bedingung (Parser legt Quoten-Logik dort ab)
       const matrixQuoteText = frage.quotenkommentar || frage.bedingung || '';
       const matrixStart = currentCol;
-      // Fallback-Antworten von Frage-Ebene (z.B. Skala 1=sehr gern...6=kenne ich nicht)
-      // Bei Matrizen liegen Antworten oft auf Frage-Ebene, nicht pro Item dupliziert
       const sharedAnswers = Array.isArray(frage.antworten) ? frage.antworten : [];
-      // Erkennt ob der matrixQuoteText nur EIN bestimmtes Item meint (z.B. "Jörg Pilawa darf nicht...")
-      // damit der Hinweis nicht generisch in alle Item-Spalten geschrieben wird
       const matrixQuoteMentionsItem = (itemLabel) => {
         if (!matrixQuoteText || !itemLabel) return false;
         const il = itemLabel.toLowerCase().trim();
@@ -505,10 +409,6 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
       };
       for (const item of frage.items) {
         const itemNote = `MUTTERFRAGE: ${frage.fragetext || ''}\n\n${matrixQuoteText}\n\n${item.note || ''}\n\n${item.marker ? 'Marker: ' + item.marker : ''}`.trim();
-        // Quote-Text-Logik mit Auto-Fallback aus Marker:
-        // 1) explizit gesetzt → nehmen
-        // 2) Mutterfrage-Hinweis erwähnt diesen Item-Namen → übernehmen
-        // 3) Marker X/Y gesetzt → Auto-Hinweis (mit Screenout-Codes wenn vorhanden)
         let itemQuote = item.quote_text || '';
         if (!itemQuote && matrixQuoteMentionsItem(item.item_label)) {
           itemQuote = matrixQuoteText;
@@ -522,21 +422,18 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
         if (!itemQuote && item.marker === 'Y') {
           itemQuote = 'Quotenrelevant: Item darf NICHT zutreffen (Marker Y)';
         }
-        // Antworten pro Item: nutze item.antworten, fallback auf frage.antworten (Matrix-Skala)
         const rawAnts = (item.antworten && item.antworten.length) ? item.antworten : sharedAnswers;
         const ants = rawAnts.map(a => ({
           ...a,
           screenout: a.screenout === true ? true :
                      (item.screenout_codes || []).map(String).includes(String(a.code)),
         }));
-        // Letzte Item-Spalte einer Matrix bekommt dicken rechten Rand
         const isLast = (item === frage.items[frage.items.length - 1]);
         writeQuestionColumn(ws, currentCol, item.item_label || '', itemNote,
                             ants, itemQuote, tnEnd, gruppe, frage, isLast);
         currentCol++;
       }
       const matrixEnd = currentCol - 1;
-      // Mutter-Header in Z5 gemerged
       if (matrixEnd > matrixStart) {
         try {
           ws.mergeCells(MATRIX_HEADER_ROW, matrixStart, MATRIX_HEADER_ROW, matrixEnd);
@@ -550,17 +447,14 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
       mh.border = borderWithThickRight(HEADER_BORDER);
       if (matrixQuoteText) mh.note = matrixQuoteText;
     } else if (frage.typ === 'freitext' || frage.typ === 'numerisch') {
-      // Freitext / Numerisch: nur Header, keine Antwort-Codes
       const note = frage.bedingung ? `Bedingung: ${frage.bedingung}` : (frage.fragetext || '');
       const label = frage.id ? `${frage.id}. ${frage.kurzlabel || frage.fragetext || ''}`.substring(0, 60) : (frage.fragetext || '');
       writeQuestionColumn(ws, currentCol, label, note, null, null, tnEnd, gruppe, frage, true);
       currentCol++;
     } else {
-      // single_choice, multi_choice, ranking
       const label = frage.id ? `${frage.id}. ${frage.fragetext || ''}` : (frage.fragetext || '');
       const note = frage.bedingung ? `Bedingung: ${frage.bedingung}` : '';
       let quoteText = frage.quotenkommentar || frage.bedingung || '';
-      // Auto-Quote-Hinweis für F1 (Geschlecht) und F2 (Alter) aus Gruppen-Daten
       if (!quoteText) {
         const ftLower = (frage.fragetext || '').toLowerCase();
         if (ftLower.includes('geschlecht') && gruppe.geschlecht && gruppe.geschlecht !== 'gemischt') {
@@ -574,17 +468,10 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
       currentCol++;
     }
   }
-  // Höhere Zeilen für Matrix-Header und Frage-Header
   ws.getRow(MATRIX_HEADER_ROW).height = 32;
   ws.getRow(HEADER_ROW).height = 75;
-
-  // Freeze Panes komplett deaktiviert — User scrollt frei in alle Richtungen
   ws.views = [{ state: 'normal' }];
 }
-
-// ---------------------------------------------------------------------------
-// 5) HANDLER
-// ---------------------------------------------------------------------------
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
@@ -601,16 +488,12 @@ export default async function handler(req, res) {
       gruppen,
       fragen,
     } = req.body ?? {};
-
     const auftraggeber = kundenname || projektname || '';
-
     if (!templateBase64) return res.status(400).json({ error: 'Missing templateBase64' });
     if (!gruppen?.length) return res.status(400).json({ error: 'Missing gruppen' });
-
     const fragenArr = Array.isArray(fragen) ? fragen : [];
     const setting = (methode === 'VGD' || methode === 'VDI') ? 'online' : 'offline';
     const cfg = SHEET_CONFIG[methode] || SHEET_CONFIG['GD'];
-
     const template = new ExcelJS.Workbook();
     await template.xlsx.load(Buffer.from(templateBase64, 'base64'));
     const srcWs = template.getWorksheet(cfg.sheetName);
@@ -620,22 +503,18 @@ export default async function handler(req, res) {
         available: template.worksheets.map(w => w.name),
       });
     }
-
     const result = new ExcelJS.Workbook();
     result.creator = 'Preview Generator';
     result.created = new Date();
     const newSheetNames = [];
-
     const processGruppe = (gruppe, sheetName, fragenFG) => {
       const dstWs = result.addWorksheet(sheetName);
       copyWorksheet(srcWs, dstWs);
-
       const methodeFG = gruppe.methode || methode;
       const cfgFG = SHEET_CONFIG[methodeFG] || SHEET_CONFIG['GD'];
       const quoteStartCol = findQuoteStartCol(dstWs, cfgFG.quoteStartCol);
       const brutto = gruppe.brutto || 8;
       const tnEnd = TN_START + brutto - 1;
-
       addConditionalFormats(dstWs, tnEnd);
       addLogo(dstWs, result, gruppe.unternehmen, setting);
       fillSheet(
@@ -644,7 +523,6 @@ export default async function handler(req, res) {
       );
       newSheetNames.push({ sheet: sheetName, quoteStartCol, brutto, tnEnd });
     };
-
     if (isIDI) {
       const hauptGruppe = { ...gruppen[0], methode };
       processGruppe(hauptGruppe, methode === 'VDI' ? 'VDIs' : 'IDIs', fragenArr);
@@ -660,15 +538,12 @@ export default async function handler(req, res) {
         processGruppe(gruppe, sheetName, fragenFG);
       }
     }
-
     const buffer = await result.xlsx.writeBuffer();
     const dateiname = `${projektnummer}_${projektname}_Preview.xlsx`
       .replace(/[^a-zA-Z0-9_\-\.äöüÄÖÜß ]/g, '_');
-
     let downloadUrl = null;
     let excelBase64 = null;
     let blobError = null;
-
     if (process.env.BLOB_READ_WRITE_TOKEN) {
       try {
         const { put } = await import('@vercel/blob');
@@ -686,7 +561,6 @@ export default async function handler(req, res) {
     } else {
       excelBase64 = Buffer.from(buffer).toString('base64');
     }
-
     return res.status(200).json({
       downloadUrl,
       excelBase64,
@@ -700,11 +574,18 @@ export default async function handler(req, res) {
         kundenname: auftraggeber,
         deliveryMode: downloadUrl ? 'blob' : 'base64',
         blobError,
-        version: 'v5-visual-polish',
+        version: 'v6-defensive-borders',
       },
     });
   } catch (err) {
-    console.error('Error:', err);
-    return res.status(500).json({ error: err?.message, stack: err?.stack });
+    console.error('Error in build-preview:', err);
+    console.error('Stack:', err?.stack);
+    return res.status(500).json({
+      success: false,
+      error: err?.message || 'Unknown error',
+      errorType: err?.name || 'Error',
+      stack: err?.stack ? String(err.stack).split('\n').slice(0, 8) : null,
+      version: 'v6-defensive-borders',
+    });
   }
 }
