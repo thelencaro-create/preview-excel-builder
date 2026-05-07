@@ -198,7 +198,7 @@ function addConditionalFormats(ws, tnEnd) {
       cfRule(`$B${TN_START}="kam zu spät mit Ankündigung"`,  COLORS.GRAU, { fontColor: 'FFFFFFFF' }),
       cfRule(`$B${TN_START}="kurzfristig abgesagt"`,         COLORS.GRAU, { fontColor: 'FFFFFFFF' }),
       cfRule(`$B${TN_START}="abgesagt durch Kunde"`,         COLORS.GRAU, { fontColor: 'FFFFFFFF' }),
-      ],
+    ],
   });
 }
 
@@ -364,8 +364,8 @@ function writeQuestionColumn(ws, col, label, note, antList, quoteText, tnEnd, gr
   }
 
   // Antwort-Codes
+  let row = tnEnd + ANT_OFFSET;
   if (antList && antList.length) {
-    let row = tnEnd + ANT_OFFSET;
     for (const ant of antList) {
       const offTarget = isAntOffTarget(frage, ant, gruppe);
       const cell = ws.getCell(row, col);
@@ -376,16 +376,17 @@ function writeQuestionColumn(ws, col, label, note, antList, quoteText, tnEnd, gr
       }
       row++;
     }
-    // Quote-Hinweis (grün) als letzte Zeile — Text bereinigt von Code-Syntax
-    const cleanedQuote = cleanQuoteText(quoteText);
-    if (cleanedQuote) {
-      const qc = ws.getCell(row, col);
-      qc.value = cleanedQuote;
-      qc.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: COLORS.GRUEN } };
-      qc.font = { name: 'Arial', size: 9, bold: true, color: { argb: COLORS.QUOTE_FONT } };
-      qc.border = cellBorder;
-      qc.alignment = { wrapText: true, vertical: 'top' };
-    }
+  }
+  // Quote-Hinweis (grün) als letzte Zeile — auch wenn keine Antworten existieren
+  // Text bereinigt von Code-Syntax
+  const cleanedQuote = cleanQuoteText(quoteText);
+  if (cleanedQuote) {
+    const qc = ws.getCell(row, col);
+    qc.value = cleanedQuote;
+    qc.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: COLORS.GRUEN } };
+    qc.font = { name: 'Arial', size: 9, bold: true, color: { argb: COLORS.QUOTE_FONT } };
+    qc.border = cellBorder;
+    qc.alignment = { wrapText: true, vertical: 'top' };
   }
 }
 
@@ -464,27 +465,41 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
       // Quote-Text fällt zurück auf bedingung (Parser legt Quoten-Logik dort ab)
       const matrixQuoteText = frage.quotenkommentar || frage.bedingung || '';
       const matrixStart = currentCol;
+      // Fallback-Antworten von Frage-Ebene (z.B. Skala 1=sehr gern...6=kenne ich nicht)
+      // Bei Matrizen liegen Antworten oft auf Frage-Ebene, nicht pro Item dupliziert
+      const sharedAnswers = Array.isArray(frage.antworten) ? frage.antworten : [];
+      // Erkennt ob der matrixQuoteText nur EIN bestimmtes Item meint (z.B. "Jörg Pilawa darf nicht...")
+      // damit der Hinweis nicht generisch in alle Item-Spalten geschrieben wird
+      const matrixQuoteMentionsItem = (itemLabel) => {
+        if (!matrixQuoteText || !itemLabel) return false;
+        const il = itemLabel.toLowerCase().trim();
+        return matrixQuoteText.toLowerCase().includes(il);
+      };
       for (const item of frage.items) {
         const itemNote = `MUTTERFRAGE: ${frage.fragetext || ''}\n\n${matrixQuoteText}\n\n${item.note || ''}\n\n${item.marker ? 'Marker: ' + item.marker : ''}`.trim();
         // Quote-Text-Logik mit Auto-Fallback aus Marker:
         // 1) explizit gesetzt → nehmen
-        // 2) Mutterfrage hat Quote-Text → übernehmen
-        // 3) Marker X/Y gesetzt aber kein expliziter Text → Auto-Hinweis generieren
+        // 2) Mutterfrage-Hinweis erwähnt diesen Item-Namen → übernehmen
+        // 3) Marker X/Y gesetzt → Auto-Hinweis (mit Screenout-Codes wenn vorhanden)
         let itemQuote = item.quote_text || '';
-        if (!itemQuote && item.is_quote_relevant && matrixQuoteText) {
+        if (!itemQuote && matrixQuoteMentionsItem(item.item_label)) {
           itemQuote = matrixQuoteText;
         }
         if (!itemQuote && item.marker === 'X') {
-          itemQuote = 'Quotenrelevant: Item muss zutreffen (Marker X)';
+          const codes = (item.screenout_codes || []).join(', ');
+          itemQuote = codes
+            ? `Quotenrelevant: Code ${codes} = Screenout`
+            : 'Quotenrelevant: Item muss zutreffen (Marker X)';
         }
         if (!itemQuote && item.marker === 'Y') {
           itemQuote = 'Quotenrelevant: Item darf NICHT zutreffen (Marker Y)';
         }
-        // Antworten pro Item: screenout wird aus item.screenout_codes berechnet wenn nicht direkt gesetzt
-        const ants = (item.antworten || []).map(a => ({
+        // Antworten pro Item: nutze item.antworten, fallback auf frage.antworten (Matrix-Skala)
+        const rawAnts = (item.antworten && item.antworten.length) ? item.antworten : sharedAnswers;
+        const ants = rawAnts.map(a => ({
           ...a,
           screenout: a.screenout === true ? true :
-                     (item.screenout_codes || []).includes(a.code),
+                     (item.screenout_codes || []).map(String).includes(String(a.code)),
         }));
         // Letzte Item-Spalte einer Matrix bekommt dicken rechten Rand
         const isLast = (item === frage.items[frage.items.length - 1]);
@@ -533,7 +548,7 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
   }
 
   // Höhere Zeilen für Matrix-Header und Frage-Header
-ws.getRow(MATRIX_HEADER_ROW).height = 32;
+  ws.getRow(MATRIX_HEADER_ROW).height = 32;
   ws.getRow(HEADER_ROW).height = 75;
 
   // Freeze Panes komplett deaktiviert — User scrollt frei in alle Richtungen
@@ -658,7 +673,7 @@ export default async function handler(req, res) {
         kundenname: auftraggeber,
         deliveryMode: downloadUrl ? 'blob' : 'base64',
         blobError,
-        version: 'v3-auto-quote-hints',
+        version: 'v4-matrix-shared-answers',
       },
     });
   } catch (err) {
