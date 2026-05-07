@@ -355,15 +355,20 @@ function writeQuestionColumn(ws, col, label, note, antList, quoteText, tnEnd, gr
 
   // TN-Zellen (genau brutto-Zeilen)
   // Letzte TN-Zeile bekommt dickere schwarze Bottom-Border (visueller Abschluss TN-Bereich)
+  const blackBottom = { style: 'medium', color: { argb: 'FF000000' } };
   for (let r = TN_START; r <= tnEnd; r++) {
     const c = ws.getCell(r, col);
     c.value = null;
     c.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: COLORS.WEISS } };
-    let b = isLastInGroup ? borderWithThickRight(THIN_BORDER) : { ...THIN_BORDER };
+    const baseBorder = isLastInGroup ? borderWithThickRight(THIN_BORDER) : { ...THIN_BORDER };
     if (r === tnEnd) {
-      b = { ...b, bottom: { style: 'medium', color: { argb: 'FF000000' } } };
+      c.border = {
+        top: baseBorder.top, left: baseBorder.left, right: baseBorder.right,
+        bottom: blackBottom,
+      };
+    } else {
+      c.border = baseBorder;
     }
-    c.border = b;
     c.alignment = { wrapText: true, vertical: 'top' };
   }
 
