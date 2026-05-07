@@ -53,7 +53,7 @@ const TN_START = 7;
 const MATRIX_HEADER_ROW = 5;
 const HEADER_ROW = 6;
 const QUOTE_HINT_AFTER_TN_OFFSET = 1;  // "X für Y"-Label = TN_END + 1
-const ANT_OFFSET = 2;                  // Antworten beginnen TN_END + 2
+const ANT_OFFSET = 3;                  // Antworten beginnen TN_END + 3 (Lücke zwischen TN und Codes)
 
 // ---------------------------------------------------------------------------
 // 2) FARBEN
@@ -186,7 +186,6 @@ function addConditionalFormats(ws, tnEnd) {
       cfRule(`$A${TN_START}="Umterminierung (Kunde)"`,    COLORS.HELLBLAU),
     ],
   });
-
   // Spalte B — Projektabschluss
   ws.addConditionalFormatting({
     ref: `B${TN_START}:B${tnEnd}`,
@@ -355,11 +354,16 @@ function writeQuestionColumn(ws, col, label, note, antList, quoteText, tnEnd, gr
   if (note) h.note = note;
 
   // TN-Zellen (genau brutto-Zeilen)
+  // Letzte TN-Zeile bekommt dickere schwarze Bottom-Border (visueller Abschluss TN-Bereich)
   for (let r = TN_START; r <= tnEnd; r++) {
     const c = ws.getCell(r, col);
     c.value = null;
     c.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: COLORS.WEISS } };
-    c.border = cellBorder;
+    let b = isLastInGroup ? borderWithThickRight(THIN_BORDER) : { ...THIN_BORDER };
+    if (r === tnEnd) {
+      b = { ...b, bottom: { style: 'medium', color: { argb: 'FF000000' } } };
+    }
+    c.border = b;
     c.alignment = { wrapText: true, vertical: 'top' };
   }
 
@@ -370,14 +374,7 @@ function writeQuestionColumn(ws, col, label, note, antList, quoteText, tnEnd, gr
       const offTarget = isAntOffTarget(frage, ant, gruppe);
       const cell = ws.getCell(row, col);
       styleAnswerCell(cell, ant, offTarget);
-      // Border ggf. mit dickem rechten Rand überschreiben
-      if (isLastInGroup) {
-        cell.border = borderWithThickRight(cell.border || THIN_BORDER);
-      }
-      row++;
-    }
-  }
-  // Quote-Hinweis (grün) als letzte Zeile — auch wenn keine Antworten existieren
+      // Quote-Hinweis (grün) als letzte Zeile — auch wenn keine Antworten existieren
   // Text bereinigt von Code-Syntax
   const cleanedQuote = cleanQuoteText(quoteText);
   if (cleanedQuote) {
@@ -420,7 +417,22 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
   ws.getCell(hmap.projNr).value         = projektnummer;
   ws.getCell(hmap.incentive).value      = gruppe.incentive || '';
 
+  // Header-Werte zentriert ausrichten (m-s und H+G Templates haben standardmäßig links,
+  // F&T zentriert — wir vereinheitlichen auf Center)
+  const headerValueCells = [
+    hmap.terminWert, hmap.kunde, hmap.zielgruppe,
+    hmap.projekt, hmap.projNr, hmap.incentive,
+  ].filter(Boolean);
+  for (const addr of headerValueCells) {
+    const c = ws.getCell(addr);
+    c.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
+  }
+  if (hmap.studioWert) {
+    ws.getCell(hmap.studioWert).alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
+  }
+
   // 3) lfd. Nr. neu setzen + "X für Y"-Label
+  // Letzte TN-Zeile auch in lfd-Nr-Spalte mit dicker Bottom-Border abschließen
   const lfdHeader = ws.getCell(HEADER_ROW, lfdCol);
   lfdHeader.note = `Brutto: ${brutto} TN\nNetto: ${netto} TN\n→ ${brutto} für ${netto}`;
   for (let r = TN_START; r <= tnEnd; r++) {
@@ -428,7 +440,18 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
     c.value = r - TN_START + 1;
     c.alignment = { horizontal: 'center', vertical: 'center' };
     c.font = { name: 'Arial', size: 10, bold: true };
+    if (r === tnEnd) {
+      const existingBorder = c.border || {};
+      c.border = { ...existingBorder, bottom: { style: 'medium', color: { argb: 'FF000000' } } };
+    }
   }
+  // Auch Tracking-Spalten links der lfd. Nr. mit dicker Abschlusslinie versehen
+  for (let col = 1; col < quoteStartCol; col++) {
+    const c = ws.getCell(tnEnd, col);
+    const existingBorder = c.border || {};
+    c.border = { ...existingBorder, bottom: { style: 'medium', color: { argb: 'FF000000' } } };
+  }
+
   const lblCell = ws.getCell(labelRow, lfdCol);
   lblCell.value = `${brutto} für ${netto}`;
   lblCell.font = { name: 'Arial', size: 9, bold: true, italic: true, color: { argb: COLORS.QUOTE_FONT } };
@@ -546,7 +569,6 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
       currentCol++;
     }
   }
-
   // Höhere Zeilen für Matrix-Header und Frage-Header
   ws.getRow(MATRIX_HEADER_ROW).height = 32;
   ws.getRow(HEADER_ROW).height = 75;
@@ -673,7 +695,7 @@ export default async function handler(req, res) {
         kundenname: auftraggeber,
         deliveryMode: downloadUrl ? 'blob' : 'base64',
         blobError,
-        version: 'v4-matrix-shared-answers',
+        version: 'v5-visual-polish',
       },
     });
   } catch (err) {
