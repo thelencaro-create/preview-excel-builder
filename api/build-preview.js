@@ -15,6 +15,10 @@
 // v8 (07.05.2026): Header-Werte werden dynamisch in die Zelle direkt rechts
 // vom Label geschrieben — funktioniert für F&T, m-s, H+G und alle künftigen
 // Online-Templates ohne Code-Änderung. Fallback auf statische HEADER_MAP.
+//
+// v9 (07.05.2026): Sub-Quoten pro Antwort-Code aus dem Screener werden in
+// der grünen Quote-Zelle aufgelistet (z.B. "• 35-38: Brutto 2"). Builder
+// filtert automatisch nach Gruppen-Kontext (jüngere/ältere Gruppe).
 import ExcelJS from "exceljs";
 import { LOGOS } from './logos.js';
 
@@ -405,8 +409,73 @@ function isAntOffTarget(frage, ant, gruppe) {
   return false;
 }
 
+// ---------------------------------------------------------------------------
+// 3b) SUB-QUOTEN-LOGIK
+// ---------------------------------------------------------------------------
+//
+// Sub-Quoten sind Verteilungs-Hinweise pro Antwort-Code aus dem Screener,
+// z.B. "Brutto 2 je jüngere Gruppe" oder "je Gruppe 1-2" oder
+// "Schwerpunkt: mind. brutto n=4 je Gruppe".
+//
+// Sie kommen aus dem Parser im Feld `ant.soll_quote` und werden in der
+// grünen Quote-Zelle als Bulletpoint-Liste angehängt.
+
+// Erkennt, ob ein soll_quote-Text auf die aktuelle Gruppe anwendbar ist.
+// Schlüsselwörter "jüngere"/"ältere" werden gegen alter_min/alter_max geprüft.
+// Ohne Gruppen-Kontext-Wörter: gilt für alle Gruppen.
+function isSollQuoteApplicable(sollQuote, gruppe, allGruppen) {
+  if (!sollQuote) return false;
+  const s = String(sollQuote).toLowerCase();
+
+  // Kein Gruppen-Kontext → gilt für alle
+  const hasYoungContext = /(j[üu]ngere?|j[üu]ngeren)/i.test(s);
+  const hasOldContext  = /([äa]ltere?|[äa]lteren)/i.test(s);
+  if (!hasYoungContext && !hasOldContext) return true;
+
+  // Mit Kontext: bestimmen ob aktuelle Gruppe "jung" oder "alt" ist.
+  // Strategie: median des alter_min aller Gruppen → unter median = jung
+  if (!gruppe.alter_min || !Array.isArray(allGruppen) || allGruppen.length < 2) {
+    return true; // im Zweifel anzeigen
+  }
+  const mins = allGruppen
+    .map(g => g.alter_min)
+    .filter(v => typeof v === 'number');
+  if (mins.length < 2) return true;
+  const sorted = [...mins].sort((a, b) => a - b);
+  const median = sorted[Math.floor(sorted.length / 2)];
+  const isYoung = gruppe.alter_min < median;
+  const isOld   = gruppe.alter_min >= median;
+
+  if (hasYoungContext && !hasOldContext) return isYoung;
+  if (hasOldContext && !hasYoungContext) return isOld;
+  return true;
+}
+
+// Sammelt Sub-Quoten der nicht-screenout, nicht-off-target Antworten,
+// gefiltert auf den aktuellen Gruppen-Kontext.
+// Liefert sauber formatierte Bullet-Liste oder leeren String.
+function buildSubQuoteList(antList, frage, gruppe, allGruppen) {
+  if (!Array.isArray(antList) || antList.length === 0) return '';
+  const lines = [];
+  const seen = new Set();
+  for (const ant of antList) {
+    if (!ant.soll_quote) continue;
+    if (ant.screenout) continue;
+    if (isAntOffTarget(frage, ant, gruppe)) continue;
+    if (!isSollQuoteApplicable(ant.soll_quote, gruppe, allGruppen)) continue;
+    // Soll-Quote-Text bereinigen (Klartext, keine Code-Syntax)
+    let txt = String(ant.soll_quote).trim();
+    txt = txt.replace(/\s+/g, ' ');
+    const key = `${ant.text}|${txt}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    lines.push(`• ${ant.text}: ${txt}`);
+  }
+  return lines.join('\n');
+}
+
 // Schreibt eine einzelne Frage-Spalte (oder Item-Spalte einer Matrix)
-function writeQuestionColumn(ws, col, label, note, antList, quoteText, tnEnd, gruppe, frage, isLastInGroup) {
+function writeQuestionColumn(ws, col, label, note, antList, quoteText, tnEnd, gruppe, frage, isLastInGroup, allGruppen) {
   ws.getColumn(col).width = 22;
 
   // Border-Variante je nachdem ob diese Spalte das Ende einer Frage/Matrix ist
@@ -455,15 +524,22 @@ function writeQuestionColumn(ws, col, label, note, antList, quoteText, tnEnd, gr
     }
   }
   // Quote-Hinweis (grün) als letzte Zeile — auch wenn keine Antworten existieren
-  // Text bereinigt von Code-Syntax
+  // Text bereinigt von Code-Syntax + Sub-Quoten pro Antwort-Code (falls vorhanden)
   const cleanedQuote = cleanQuoteText(quoteText);
-  if (cleanedQuote) {
+  const subQuoteList = buildSubQuoteList(antList, frage, gruppe, allGruppen);
+  const finalQuoteText = [cleanedQuote, subQuoteList].filter(Boolean).join('\n');
+  if (finalQuoteText) {
     const qc = ws.getCell(row, col);
-    qc.value = cleanedQuote;
+    qc.value = finalQuoteText;
     qc.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: COLORS.GRUEN } };
     qc.font = { name: 'Arial', size: 9, bold: true, color: { argb: COLORS.QUOTE_FONT } };
     qc.border = cellBorder;
     qc.alignment = { wrapText: true, vertical: 'top' };
+    // Zeilenhöhe der Quote-Zeile dynamisch erhöhen, wenn mehrzeilig
+    const lineCount = finalQuoteText.split('\n').length;
+    if (lineCount > 1) {
+      ws.getRow(row).height = Math.min(15 + lineCount * 14, 200);
+    }
   }
 }
 
@@ -471,7 +547,7 @@ function writeQuestionColumn(ws, col, label, note, antList, quoteText, tnEnd, gr
 // 4) HAUPT-FILL-LOGIK
 // ---------------------------------------------------------------------------
 
-function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, setting, methode, quoteStartCol) {
+function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, setting, methode, quoteStartCol, allGruppen) {
   const baseHmap = HEADER_MAP[setting] || HEADER_MAP.offline;
   // Online: dynamisch erkannte Positionen überschreiben die statische Map.
   // Offline: bleibt bei der statischen Map (Studio-Logik mit eigener Struktur).
@@ -619,7 +695,7 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
         // Letzte Item-Spalte einer Matrix bekommt dicken rechten Rand
         const isLast = (item === frage.items[frage.items.length - 1]);
         writeQuestionColumn(ws, currentCol, item.item_label || '', itemNote,
-                            ants, itemQuote, tnEnd, gruppe, frage, isLast);
+                            ants, itemQuote, tnEnd, gruppe, frage, isLast, allGruppen);
         currentCol++;
       }
       const matrixEnd = currentCol - 1;
@@ -640,7 +716,7 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
       // Freitext / Numerisch: nur Header, keine Antwort-Codes
       const note = frage.bedingung ? `Bedingung: ${frage.bedingung}` : (frage.fragetext || '');
       const label = frage.id ? `${frage.id}. ${frage.kurzlabel || frage.fragetext || ''}`.substring(0, 60) : (frage.fragetext || '');
-      writeQuestionColumn(ws, currentCol, label, note, null, null, tnEnd, gruppe, frage, true);
+      writeQuestionColumn(ws, currentCol, label, note, null, null, tnEnd, gruppe, frage, true, allGruppen);
       currentCol++;
     } else {
       // single_choice, multi_choice, ranking
@@ -657,7 +733,7 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
         }
       }
       writeQuestionColumn(ws, currentCol, label, note,
-                          frage.antworten, quoteText, tnEnd, gruppe, frage, true);
+                          frage.antworten, quoteText, tnEnd, gruppe, frage, true, allGruppen);
       currentCol++;
     }
   }
@@ -728,7 +804,7 @@ export default async function handler(req, res) {
       addLogo(dstWs, result, gruppe.unternehmen, setting);
       fillSheet(
         dstWs, gruppe, fragenFG, projektnummer, projektname,
-        auftraggeber, setting, methodeFG, quoteStartCol
+        auftraggeber, setting, methodeFG, quoteStartCol, gruppen
       );
       newSheetNames.push({ sheet: sheetName, quoteStartCol, brutto, tnEnd });
     };
@@ -788,7 +864,7 @@ export default async function handler(req, res) {
         kundenname: auftraggeber,
         deliveryMode: downloadUrl ? 'blob' : 'base64',
         blobError,
-        version: 'v8-template-aware-headers',
+        version: 'v9-sub-quotes',
       },
     });
   } catch (err) {
@@ -800,7 +876,7 @@ export default async function handler(req, res) {
       error: err?.message || 'Unknown error',
       errorType: err?.name || 'Error',
       stack: err?.stack ? String(err.stack).split('\n').slice(0, 8) : null,
-      version: 'v8-template-aware-headers',
+      version: 'v9-sub-quotes',
     });
   }
 }
