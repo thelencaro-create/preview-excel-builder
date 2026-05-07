@@ -347,13 +347,17 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
   ws.getCell(hmap.projekt).value        = projektname;
   ws.getCell(hmap.projNr).value         = projektnummer;
   ws.getCell(hmap.incentive).value      = gruppe.incentive || '';
+// Header-Werte links-bündig ausrichten (vereinheitlicht für alle Templates)
   const headerValueCells = [
     hmap.terminWert, hmap.kunde, hmap.zielgruppe,
     hmap.projekt, hmap.projNr, hmap.incentive,
   ].filter(Boolean);
   for (const addr of headerValueCells) {
     const c = ws.getCell(addr);
-    c.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
+    c.alignment = { horizontal: 'left', vertical: 'middle', wrapText: true, indent: 1 };
+  }
+  if (hmap.studioWert) {
+    ws.getCell(hmap.studioWert).alignment = { horizontal: 'left', vertical: 'middle', wrapText: true, indent: 1 };
   }
   if (hmap.studioWert) {
     ws.getCell(hmap.studioWert).alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
@@ -590,7 +594,7 @@ export default async function handler(req, res) {
       error: err?.message || 'Unknown error',
       errorType: err?.name || 'Error',
       stack: err?.stack ? String(err.stack).split('\n').slice(0, 8) : null,
-      version: 'v6-defensive-borders',
+      version: 'v7-defensive-borders',
     });
   }
 }
