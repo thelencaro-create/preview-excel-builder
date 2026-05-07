@@ -37,7 +37,7 @@ const TN_START = 7;
 const MATRIX_HEADER_ROW = 5;
 const HEADER_ROW = 6;
 const QUOTE_HINT_AFTER_TN_OFFSET = 1;
-const ANT_OFFSET = 3;
+const ANT_OFFSET = 2;
 
 const COLORS = {
   DUNKELROT:   'FFC00000',
@@ -234,7 +234,12 @@ function styleAnswerCell(cell, ant, isOffTarget) {
     bold: isRedHighlighted,
     color: { argb: isRedHighlighted ? 'FFFFFFFF' : 'FF000000' },
   };
-  cell.border = { ...THIN_BORDER };
+ // Sichtbare schwarze Borders rundum (statt zartes Grau, das in Excel kaum sichtbar ist)
+  const blackThin = { style: 'thin', color: { argb: 'FF000000' } };
+  cell.border = {
+    top: blackThin, bottom: blackThin,
+    left: blackThin, right: blackThin,
+  };
   cell.alignment = { wrapText: true, vertical: 'top' };
 }
 
