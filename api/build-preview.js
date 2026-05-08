@@ -1,3 +1,78 @@
+
+build-preview(3).js
+Your file will expire in 24 hours unless you Sign Up.
+
+Add a CTAUpgrade
+Button visibility
+Button type
+Button text
+Button link
+Button color
+Text color
+Button style
+Show my photo
+
+Add Lead Capture Form
+Appearance
+Title
+- 55 Characters
+Description
+- 200 Characters
+Select Fields
+Mandatory
+Full Name
+Email Address
+Phone Number
+Button Text
+- 50 Characters
+Button color
+Text color
+Allow viewer to skip
+
+Choose ThumbnailUpgrade
+
+    Static
+    Animation
+
+Trim your video using the handles and Split button. Merge with other videos by clicking the Add Clip button.
+View help article
+
+Edit Captions
+
+Engagement Insights
+
+    Video Views
+    0
+    Video Downloads
+    0
+    Call-to-Action Clicks
+    0
+    Average Completion Rate
+    0%
+
+viewers
+
+    Someone from Pakistan desktop
+    Apr 14, 2021
+    Someone from Pakistan desktop
+    Apr 14, 2021
+    Someone from Pakistan desktop
+    Apr 14, 2021
+
+Transcription
+
+Enable transcriptions to enhance audience accessibility
+
+Engagement Insights
+
+Analytics
+
+Find out who viewed and downloaded
+your file, when, and from where.
+
+0 Comments
+Leave a comment
+
 // api/build-preview.js
 // Preview Generator – Excel Builder v8 (template-aware headers)
 //
@@ -19,6 +94,17 @@
 // v9 (07.05.2026): Sub-Quoten pro Antwort-Code aus dem Screener werden in
 // der grünen Quote-Zelle aufgelistet (z.B. "• 35-38: Brutto 2"). Builder
 // filtert automatisch nach Gruppen-Kontext (jüngere/ältere Gruppe).
+//
+// v10 (07.05.2026): Vollständige Screener-Robustheit
+// - Patch 1: Compact-Matrix für riesige Matrizen (Option C: quotenrelevante
+//   Items eigene Spalte, Rest in Sammelspalte) — Toggle via compactMatrix
+// - Patch 2: Soll-Quoten gruppen-spezifisch (soll_quote_gilt_fuer)
+// - Patch 3: Bedingungs-Markierung (gelber Rahmen + 🔀-Symbol bei
+//   conditional Fragen)
+// - Patch 4: Off-Target-Erkennung erweitert (Region/Stadt, Lifestage,
+//   Marken-Verwendung)
+// - Patch 5: Quotengrid-Hinweis im Sheet-Header (zuordnungs_kriterien)
+// - Patch 6: Visueller Hinweis bei Fragen mit relevantFuerGruppen != alle
 import ExcelJS from "exceljs";
 import { LOGOS } from './logos.js';
 
@@ -386,6 +472,11 @@ function cleanQuoteText(raw) {
 // Off-Target-Erkennung pro Frage und Gruppe
 // Markiert Antwort-Codes als off_target wenn sie nicht zur Zielgruppe der Gruppe passen
 // (z.B. "weiblich" in einer Männer-Gruppe, oder "47-50" in einer 35-46-Gruppe)
+//
+// PATCH 4 (v10): Off-Target-Erkennung erweitert um:
+//  - Stadt/Region (gruppe.standort)
+//  - Code-basierte Off-Targets über Whitelist `ant.off_target_fuer_gruppen`
+//    (vom Parser befüllt, falls Antwort-Text nicht eindeutig)
 function isAntOffTarget(frage, ant, gruppe) {
   const ftLower = (frage.fragetext || '').toLowerCase();
   const antLower = (ant.text || '').toLowerCase();
@@ -404,6 +495,26 @@ function isAntOffTarget(frage, ant, gruppe) {
       const hi = parseInt(m[2], 10);
       if (hi < gruppe.alter_min || lo > gruppe.alter_max) return true;
     }
+  }
+
+  // Stadt/Region — wenn Frage nach Wohnort fragt und Gruppe einen Standort hat,
+  // sind andere Standort-Antworten off-target
+  if (ftLower.match(/wohnen|stadt|standort|region/) && gruppe.standort) {
+    const std = gruppe.standort.toLowerCase();
+    if (std && std !== 'online' && antLower.length > 2 && !antLower.includes(std) && !std.includes(antLower)) {
+      // Nur prüfen wenn die Antwort kein Freitext ist sondern eine konkrete Stadt
+      // (Heuristik: Antwort enthält eine andere bekannte Stadt)
+      const cities = ['köln', 'münchen', 'hannover', 'berlin', 'hamburg', 'bochum', 'frankfurt'];
+      if (cities.some(c => antLower === c || antLower.startsWith(c + ' ') || antLower.endsWith(' ' + c))) {
+        return true;
+      }
+    }
+  }
+
+  // Whitelist vom Parser: ant.off_target_fuer_gruppen = ["GD1", "GD3"]
+  // → Antwort ist off-target für genau diese Gruppen
+  if (Array.isArray(ant.off_target_fuer_gruppen) && ant.off_target_fuer_gruppen.includes(gruppe.id)) {
+    return true;
   }
 
   return false;
@@ -462,6 +573,11 @@ function buildSubQuoteList(antList, frage, gruppe, allGruppen) {
     if (!ant.soll_quote) continue;
     if (ant.screenout) continue;
     if (isAntOffTarget(frage, ant, gruppe)) continue;
+    // PATCH 2: Wenn Antwort eine Gruppen-Whitelist hat → prüfen ob aktuelle Gruppe drin ist
+    if (Array.isArray(ant.soll_quote_gilt_fuer) && ant.soll_quote_gilt_fuer.length > 0) {
+      if (!ant.soll_quote_gilt_fuer.includes(gruppe.id)) continue;
+    }
+    // Klartext-Schlüsselwort-Filter (jüngere/ältere)
     if (!isSollQuoteApplicable(ant.soll_quote, gruppe, allGruppen)) continue;
     // Soll-Quote-Text bereinigen (Klartext, keine Code-Syntax)
     let txt = String(ant.soll_quote).trim();
@@ -474,19 +590,75 @@ function buildSubQuoteList(antList, frage, gruppe, allGruppen) {
   return lines.join('\n');
 }
 
+// ---------------------------------------------------------------------------
+// 3c) BEDINGUNGS-ERKENNUNG (Patch 3 + 6)
+// ---------------------------------------------------------------------------
+// Erkennt, ob eine Frage konditional ist (nur für bestimmte Gruppen oder
+// abhängig von vorherigen Antworten). Wird visuell mit gelbem Rahmen
+// markiert.
+function isConditionalFrage(frage) {
+  // Hat eine Bedingung
+  if (frage.bedingung && String(frage.bedingung).trim().length > 0) return true;
+  // Ist auf bestimmte Gruppen beschränkt
+  if (Array.isArray(frage.relevantFuerGruppen)
+      && frage.relevantFuerGruppen.length > 0
+      && !frage.relevantFuerGruppen.includes('alle')) return true;
+  return false;
+}
+
+// ---------------------------------------------------------------------------
+// 3d) MATRIX-ITEM-PARTITIONIERUNG (Patch 1: Compact-Matrix)
+// ---------------------------------------------------------------------------
+// Teilt Matrix-Items in zwei Gruppen:
+//   - quotenrelevant (Marker X/Y oder is_quote_relevant=true)
+//   - "Sonstige" (alles andere)
+// Wird nur angewendet, wenn:
+//   - compactMatrix-Toggle ist true UND
+//   - Anzahl Items >= compactThreshold (Default 5)
+function partitionMatrixItems(items, compactMatrix, compactThreshold) {
+  if (!Array.isArray(items)) return { quotaItems: [], otherItems: [] };
+  if (!compactMatrix || items.length < compactThreshold) {
+    // Kein Compact-Mode: alle bekommen eigene Spalte (= heutiges Verhalten)
+    return { quotaItems: items.slice(), otherItems: [] };
+  }
+  const quotaItems = [];
+  const otherItems = [];
+  for (const it of items) {
+    const isQuotaRelevant = it.is_quote_relevant === true
+      || it.marker === 'X' || it.marker === 'Y'
+      || (Array.isArray(it.screenout_codes) && it.screenout_codes.length > 0);
+    if (isQuotaRelevant) quotaItems.push(it);
+    else otherItems.push(it);
+  }
+  return { quotaItems, otherItems };
+}
+
 // Schreibt eine einzelne Frage-Spalte (oder Item-Spalte einer Matrix)
 function writeQuestionColumn(ws, col, label, note, antList, quoteText, tnEnd, gruppe, frage, isLastInGroup, allGruppen) {
   ws.getColumn(col).width = 22;
 
   // Border-Variante je nachdem ob diese Spalte das Ende einer Frage/Matrix ist
   const cellBorder = isLastInGroup ? borderWithThickRight(THIN_BORDER) : { ...THIN_BORDER };
-  const headerBorder = isLastInGroup ? borderWithThickRight(HEADER_BORDER) : HEADER_BORDER;
+  let headerBorder = isLastInGroup ? borderWithThickRight(HEADER_BORDER) : HEADER_BORDER;
+
+  // PATCH 3+6: Bedingungs-Markierung — gelber Rahmen bei conditional Fragen
+  const isConditional = frage && isConditionalFrage(frage);
+  if (isConditional) {
+    const yellowMedium = { style: 'medium', color: { argb: 'FFD4A017' } };
+    headerBorder = {
+      top: yellowMedium,
+      bottom: yellowMedium,
+      left: yellowMedium,
+      right: isLastInGroup ? borderWithThickRight({}).right : yellowMedium,
+    };
+  }
 
   const h = ws.getCell(HEADER_ROW, col);
-  h.value = label;
+  // Bei conditional Fragen: Wechsel-Symbol vor Frage-Titel (Patch 3)
+  h.value = isConditional ? `🔀 ${label}` : label;
   h.font = { bold: true, name: 'Arial', size: 9, color: { argb: 'FF000000' } };
   h.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
-  h.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: COLORS.HEADER_GREY } };
+  h.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: isConditional ? 'FFFFF2CC' : COLORS.HEADER_GREY } };
   h.border = headerBorder;
   if (note) h.note = note;
 
@@ -547,7 +719,10 @@ function writeQuestionColumn(ws, col, label, note, antList, quoteText, tnEnd, gr
 // 4) HAUPT-FILL-LOGIK
 // ---------------------------------------------------------------------------
 
-function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, setting, methode, quoteStartCol, allGruppen) {
+function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, setting, methode, quoteStartCol, allGruppen, options) {
+  const opts = options || {};
+  const compactMatrix = opts.compactMatrix === true;
+  const compactThreshold = opts.compactMatrixThreshold || 5;
   const baseHmap = HEADER_MAP[setting] || HEADER_MAP.offline;
   // Online: dynamisch erkannte Positionen überschreiben die statische Map.
   // Offline: bleibt bei der statischen Map (Studio-Logik mit eigener Struktur).
@@ -573,7 +748,11 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
   }
   ws.getCell(hmap.terminWert).value     = gruppe.termin || `${gruppe.datum || ''} ${gruppe.uhrzeit || ''}`.trim();
   ws.getCell(hmap.kunde).value          = kundenname || '';
+  // PATCH 5: Zielgruppe + Zuordnungs-Kriterien als Tooltip am Zielgruppe-Feld
   ws.getCell(hmap.zielgruppe).value     = gruppe.zielgruppe || '';
+  if (gruppe.zuordnungs_kriterien) {
+    ws.getCell(hmap.zielgruppe).note = `Zuordnungs-Kriterien:\n${gruppe.zuordnungs_kriterien}`;
+  }
   ws.getCell(hmap.projekt).value        = projektname;
   ws.getCell(hmap.projNr).value         = projektnummer;
   ws.getCell(hmap.incentive).value      = gruppe.incentive || '';
@@ -666,12 +845,21 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
         const il = itemLabel.toLowerCase().trim();
         return matrixQuoteText.toLowerCase().includes(il);
       };
-      for (const item of frage.items) {
+
+      // PATCH 1: Compact-Matrix — bei vielen Items quotenrelevante einzeln,
+      // andere als Sammelspalte. Per Toggle aktivierbar.
+      const partitioned = partitionMatrixItems(frage.items, compactMatrix, compactThreshold);
+      const itemsToColumns = partitioned.quotaItems;
+      const otherItems = partitioned.otherItems;
+
+      const totalCols = itemsToColumns.length + (otherItems.length > 0 ? 1 : 0);
+      let writtenInMatrix = 0;
+
+      for (const item of itemsToColumns) {
+        writtenInMatrix++;
+        const isLast = (writtenInMatrix === totalCols);
         const itemNote = `MUTTERFRAGE: ${frage.fragetext || ''}\n\n${matrixQuoteText}\n\n${item.note || ''}\n\n${item.marker ? 'Marker: ' + item.marker : ''}`.trim();
         // Quote-Text-Logik mit Auto-Fallback aus Marker:
-        // 1) explizit gesetzt → nehmen
-        // 2) Mutterfrage-Hinweis erwähnt diesen Item-Namen → übernehmen
-        // 3) Marker X/Y gesetzt → Auto-Hinweis (mit Screenout-Codes wenn vorhanden)
         let itemQuote = item.quote_text || '';
         if (!itemQuote && matrixQuoteMentionsItem(item.item_label)) {
           itemQuote = matrixQuoteText;
@@ -685,6 +873,10 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
         if (!itemQuote && item.marker === 'Y') {
           itemQuote = 'Quotenrelevant: Item darf NICHT zutreffen (Marker Y)';
         }
+        // Item-Soll-Quote (z.B. "max. 1 TN") direkt in Quote-Text einbauen
+        if (item.soll_quote) {
+          itemQuote = (itemQuote ? itemQuote + '\n' : '') + `• ${item.soll_quote}`;
+        }
         // Antworten pro Item: nutze item.antworten, fallback auf frage.antworten (Matrix-Skala)
         const rawAnts = (item.antworten && item.antworten.length) ? item.antworten : sharedAnswers;
         const ants = rawAnts.map(a => ({
@@ -692,12 +884,29 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
           screenout: a.screenout === true ? true :
                      (item.screenout_codes || []).map(String).includes(String(a.code)),
         }));
-        // Letzte Item-Spalte einer Matrix bekommt dicken rechten Rand
-        const isLast = (item === frage.items[frage.items.length - 1]);
         writeQuestionColumn(ws, currentCol, item.item_label || '', itemNote,
                             ants, itemQuote, tnEnd, gruppe, frage, isLast, allGruppen);
         currentCol++;
       }
+
+      // PATCH 1: Sammelspalte für nicht-quotenrelevante Items
+      if (otherItems.length > 0) {
+        writtenInMatrix++;
+        const summaryLabel = `Weitere Items (${otherItems.length})`;
+        const summaryNote = `MUTTERFRAGE: ${frage.fragetext || ''}\n\nNicht quotenrelevante Items (zur Info, ohne Quote):\n\n` +
+          otherItems.map(it => `• ${it.item_label || ''}`).join('\n') + 
+          `\n\nDiese Items haben keine Screenouts/Marker — Antworten werden in einer Sammelspalte erfasst.`;
+        // Antwort-Skala: gemeinsame Frage-Antworten verwenden, falls vorhanden
+        const summaryAnts = sharedAnswers;
+        // Quote-Text: Hinweis auf Sammelspalte
+        const summaryQuote = `Sammelspalte: ${otherItems.length} weitere Items (siehe Tooltip)\nKein Screenout, kein Quoten-Marker.`;
+        writeQuestionColumn(ws, currentCol, summaryLabel, summaryNote,
+                            summaryAnts, summaryQuote, tnEnd, gruppe, frage, true, allGruppen);
+        // Sammelspalte etwas breiter machen
+        ws.getColumn(currentCol).width = 28;
+        currentCol++;
+      }
+
       const matrixEnd = currentCol - 1;
       // Mutter-Header in Z5 gemerged
       if (matrixEnd > matrixStart) {
@@ -706,7 +915,11 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
         } catch (e) {}
       }
       const mh = ws.getCell(MATRIX_HEADER_ROW, matrixStart);
-      mh.value = frage.fragetext || frage.id;
+      // Mutter-Header zeigt zusätzlich Hinweis bei Compact-Mode
+      const compactHint = (compactMatrix && otherItems.length > 0)
+        ? ` [kompakt: ${itemsToColumns.length}/${frage.items.length} relevante Items]`
+        : '';
+      mh.value = (frage.fragetext || frage.id) + compactHint;
       mh.font = { name: 'Arial', size: 10, bold: true };
       mh.alignment = { horizontal: 'center', vertical: 'center', wrapText: true };
       mh.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: COLORS.MATRIX_HDR } };
@@ -764,9 +977,15 @@ export default async function handler(req, res) {
       isIDI,
       gruppen,
       fragen,
+      compactMatrix,            // PATCH 1: optionaler Toggle aus dem Form
+      compactMatrixThreshold,   // optional: Item-Schwellwert (Default 5)
     } = req.body ?? {};
 
     const auftraggeber = kundenname || projektname || '';
+    const builderOptions = {
+      compactMatrix: compactMatrix === true || compactMatrix === 'true',
+      compactMatrixThreshold: parseInt(compactMatrixThreshold) || 5,
+    };
 
     if (!templateBase64) return res.status(400).json({ error: 'Missing templateBase64' });
     if (!gruppen?.length) return res.status(400).json({ error: 'Missing gruppen' });
@@ -804,7 +1023,7 @@ export default async function handler(req, res) {
       addLogo(dstWs, result, gruppe.unternehmen, setting);
       fillSheet(
         dstWs, gruppe, fragenFG, projektnummer, projektname,
-        auftraggeber, setting, methodeFG, quoteStartCol, gruppen
+        auftraggeber, setting, methodeFG, quoteStartCol, gruppen, builderOptions
       );
       newSheetNames.push({ sheet: sheetName, quoteStartCol, brutto, tnEnd });
     };
@@ -864,7 +1083,9 @@ export default async function handler(req, res) {
         kundenname: auftraggeber,
         deliveryMode: downloadUrl ? 'blob' : 'base64',
         blobError,
-        version: 'v9-sub-quotes',
+        compactMatrix: builderOptions.compactMatrix,
+        compactMatrixThreshold: builderOptions.compactMatrixThreshold,
+        version: 'v10-screener-robust',
       },
     });
   } catch (err) {
@@ -876,7 +1097,8 @@ export default async function handler(req, res) {
       error: err?.message || 'Unknown error',
       errorType: err?.name || 'Error',
       stack: err?.stack ? String(err.stack).split('\n').slice(0, 8) : null,
-      version: 'v9-sub-quotes',
+      version: 'v10-screener-robust',
     });
   }
 }
+
