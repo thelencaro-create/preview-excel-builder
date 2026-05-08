@@ -1,5 +1,5 @@
 // api/build-preview.js
-// Preview Generator – Excel Builder v10 (screener-robust)
+// Preview Generator – Excel Builder v8 (template-aware headers)
 //
 // Layout-Konzept:
 //   Z1-4:    Header (Studio, Kunde, Projekt) — aus Template
@@ -30,6 +30,17 @@
 //   Marken-Verwendung)
 // - Patch 5: Quotengrid-Hinweis im Sheet-Header (zuordnungs_kriterien)
 // - Patch 6: Visueller Hinweis bei Fragen mit relevantFuerGruppen != alle
+//
+// v11 (08.05.2026): Universelle Screener-Robustheit
+// Die 8 Patches aus der Diagnose-Tabelle (Raucher GD + JPM IDI):
+// - P1: Erweiterung Screenout-Vokabular im Parser (BEENDEN/Schließen/X/*)
+// - P2: Gruppen-Tabellen mit Vererbung leerer Zellen (Parser)
+// - P3: Gruppen-spezifische Quoten ("Gruppen X & Y" → soll_quote_gilt_fuer)
+// - P4: soll_quote als Liste mit gilt_fuer_gruppen pro Eintrag (Schema)
+// - P5: kurz_label für Frage-Header (max 30 Zeichen, Parser-generiert)
+// - P6: idiProfile[] mit Segment, Cluster, profile_quoten (Schema)
+// - P7: segment_beschreibungen + studien_quoten in Spalte G ab Z+8 (Builder)
+// - P8: typ='tool_input' für Algorithmus-Skalen (1 Sammelspalte)
 import ExcelJS from "exceljs";
 import { LOGOS } from './logos.js';
 
@@ -487,30 +498,65 @@ function isSollQuoteApplicable(sollQuote, gruppe, allGruppen) {
   return true;
 }
 
+// Hilfsfunktion: Liefert die Liste der soll_quote-Einträge,
+// egal ob als String (alt v9) oder als Liste von {text, gilt_fuer_gruppen} (v11)
+function getSollQuoteList(raw) {
+  if (!raw) return [];
+  if (typeof raw === 'string') {
+    const t = raw.trim();
+    return t ? [{ text: t, gilt_fuer_gruppen: [] }] : [];
+  }
+  if (Array.isArray(raw)) {
+    return raw
+      .map(q => {
+        if (typeof q === 'string') return { text: q.trim(), gilt_fuer_gruppen: [] };
+        if (!q || typeof q !== 'object') return null;
+        return {
+          text: String(q.text || '').trim(),
+          gilt_fuer_gruppen: Array.isArray(q.gilt_fuer_gruppen)
+            ? q.gilt_fuer_gruppen.map(String)
+            : [],
+        };
+      })
+      .filter(q => q && q.text);
+  }
+  return [];
+}
+
 // Sammelt Sub-Quoten der nicht-screenout, nicht-off-target Antworten,
 // gefiltert auf den aktuellen Gruppen-Kontext.
+// v11: soll_quote ist jetzt eine Liste pro Antwort, mit gruppen-spezifischen Einträgen.
 // Liefert sauber formatierte Bullet-Liste oder leeren String.
 function buildSubQuoteList(antList, frage, gruppe, allGruppen) {
   if (!Array.isArray(antList) || antList.length === 0) return '';
   const lines = [];
   const seen = new Set();
   for (const ant of antList) {
-    if (!ant.soll_quote) continue;
     if (ant.screenout) continue;
     if (isAntOffTarget(frage, ant, gruppe)) continue;
-    // PATCH 2: Wenn Antwort eine Gruppen-Whitelist hat → prüfen ob aktuelle Gruppe drin ist
-    if (Array.isArray(ant.soll_quote_gilt_fuer) && ant.soll_quote_gilt_fuer.length > 0) {
-      if (!ant.soll_quote_gilt_fuer.includes(gruppe.id)) continue;
+
+    // v11: soll_quote ist Liste, jeder Eintrag kann eigene Gruppen-Whitelist haben
+    const quotes = getSollQuoteList(ant.soll_quote);
+    if (quotes.length === 0) continue;
+
+    for (const q of quotes) {
+      // Gruppen-spezifischer Filter: Eintrag gilt nur für bestimmte Gruppen
+      if (Array.isArray(q.gilt_fuer_gruppen) && q.gilt_fuer_gruppen.length > 0) {
+        if (!q.gilt_fuer_gruppen.includes(gruppe.id)) continue;
+      }
+      // Backward-Compat v10: ant.soll_quote_gilt_fuer (selten, aber möglich)
+      if (Array.isArray(ant.soll_quote_gilt_fuer) && ant.soll_quote_gilt_fuer.length > 0) {
+        if (!ant.soll_quote_gilt_fuer.includes(gruppe.id)) continue;
+      }
+      // Klartext-Schlüsselwort-Filter (jüngere/ältere) als Backup
+      if (!isSollQuoteApplicable(q.text, gruppe, allGruppen)) continue;
+
+      const txt = q.text.replace(/\s+/g, ' ');
+      const key = `${ant.text}|${txt}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      lines.push(`• ${ant.text}: ${txt}`);
     }
-    // Klartext-Schlüsselwort-Filter (jüngere/ältere)
-    if (!isSollQuoteApplicable(ant.soll_quote, gruppe, allGruppen)) continue;
-    // Soll-Quote-Text bereinigen (Klartext, keine Code-Syntax)
-    let txt = String(ant.soll_quote).trim();
-    txt = txt.replace(/\s+/g, ' ');
-    const key = `${ant.text}|${txt}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    lines.push(`• ${ant.text}: ${txt}`);
   }
   return lines.join('\n');
 }
@@ -643,6 +689,113 @@ function writeQuestionColumn(ws, col, label, note, antList, quoteText, tnEnd, gr
 // ---------------------------------------------------------------------------
 // 4) HAUPT-FILL-LOGIK
 // ---------------------------------------------------------------------------
+
+// v11: IDI-Profile, Segment-Beschreibungen und Studien-Quoten in Spalte G ausspielen
+//
+// Layout im JPM-Vorbild:
+//   Z22+ Spalte G: Segment-Beschreibungen untereinander
+//     "Segment 1 — Ambitious Maximisers"
+//     "Jüngere bis mittlere Altersgruppe (18-50)"
+//     "Eltern, die Vollzeit arbeiten"
+//     "..."
+//     (leere Zeile)
+//     "Segment 2 — Experienced Optimisers"
+//     "..."
+//
+// Die studien_quoten werden ans Ende angehängt unter Überschrift "Studien-Quoten".
+function writeIdiInfoBlock(ws, opts) {
+  const { idiProfile, segment_beschreibungen, studien_quoten, tnEnd } = opts;
+  if (!segment_beschreibungen && !studien_quoten?.length && !idiProfile?.length) return;
+
+  // Spalte G ist im IDI-Sheet "Feedback zum TN" — dort schreiben
+  const col = 7; // G
+  let row = tnEnd + 8; // genug Abstand zu TN-Daten und Quote-Hinweisen
+
+  ws.getColumn(col).width = Math.max(ws.getColumn(col).width || 20, 30);
+
+  // 1) Segment-Beschreibungen
+  if (segment_beschreibungen && Object.keys(segment_beschreibungen).length > 0) {
+    let segIdx = 1;
+    for (const [name, desc] of Object.entries(segment_beschreibungen)) {
+      const headerCell = ws.getCell(row, col);
+      headerCell.value = `Segment ${segIdx} — ${name}`;
+      headerCell.font = { name: 'Arial', size: 10, bold: true, color: { argb: 'FF1F4E79' } };
+      headerCell.alignment = { wrapText: true, vertical: 'top' };
+      row++;
+      // Beschreibung (kann mehrzeilig sein)
+      const descCell = ws.getCell(row, col);
+      descCell.value = String(desc);
+      descCell.font = { name: 'Arial', size: 9 };
+      descCell.alignment = { wrapText: true, vertical: 'top' };
+      const lineCount = String(desc).split('\n').length;
+      ws.getRow(row).height = Math.min(15 + lineCount * 14, 200);
+      row++;
+      // Leere Zeile als Trenner
+      row++;
+      segIdx++;
+    }
+  }
+
+  // 2) IDI-Profile (wenn idiProfile-Liste vorhanden)
+  if (Array.isArray(idiProfile) && idiProfile.length > 0) {
+    const headerCell = ws.getCell(row, col);
+    headerCell.value = `IDI-Profile (${idiProfile.length} Interviews)`;
+    headerCell.font = { name: 'Arial', size: 10, bold: true, color: { argb: 'FF1F4E79' } };
+    row++;
+    for (const p of idiProfile) {
+      const segLabel = p.segment_oder?.length
+        ? `${p.segment} (oder ${p.segment_oder.join(', ')})`
+        : p.segment;
+      const profileText = `${p.id}: ${segLabel}` +
+        (p.cluster ? ` — ${p.cluster}` : '') +
+        (p.profile_quoten?.length
+          ? '\n  ' + p.profile_quoten.map(q => `• ${q.text}`).join('\n  ')
+          : '');
+      const c = ws.getCell(row, col);
+      c.value = profileText;
+      c.font = { name: 'Arial', size: 9 };
+      c.alignment = { wrapText: true, vertical: 'top' };
+      const lc = profileText.split('\n').length;
+      ws.getRow(row).height = Math.min(15 + lc * 14, 150);
+      row++;
+    }
+    row++; // Trenner
+  }
+
+  // 3) Studien-Quoten (gelten studienweit)
+  if (Array.isArray(studien_quoten) && studien_quoten.length > 0) {
+    const headerCell = ws.getCell(row, col);
+    headerCell.value = 'Studien-Quoten (gelten für alle TN)';
+    headerCell.font = { name: 'Arial', size: 10, bold: true, color: { argb: 'FF1F4E79' } };
+    row++;
+    for (const q of studien_quoten) {
+      const c = ws.getCell(row, col);
+      c.value = `• ${q}`;
+      c.font = { name: 'Arial', size: 9 };
+      c.alignment = { wrapText: true, vertical: 'top' };
+      row++;
+    }
+  }
+}
+
+// v11: Frage-Header-Label bauen.
+//  - Bevorzugt frage.kurz_label (Parser-generiert, max ~30 Zeichen)
+//  - Fallback: frage.fragetext (gekürzt auf 60 Zeichen)
+//  - Frage-Nummer (id) wird vorangestellt, wenn nicht schon im kurz_label enthalten
+function buildHeaderLabel(frage) {
+  const id = (frage.id || '').trim();
+  const kurz = (frage.kurz_label || frage.kurzlabel || '').trim();
+  const lang = (frage.fragetext || '').trim();
+  if (kurz) {
+    // Wenn kurz_label schon mit der ID startet, nicht doppelt
+    if (id && !kurz.toLowerCase().startsWith(id.toLowerCase())) {
+      return `${id}. ${kurz}`.substring(0, 60);
+    }
+    return kurz.substring(0, 60);
+  }
+  if (id && lang) return `${id}. ${lang}`.substring(0, 60);
+  return (lang || id).substring(0, 60);
+}
 
 function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, setting, methode, quoteStartCol, allGruppen, options) {
   const opts = options || {};
@@ -798,9 +951,13 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
         if (!itemQuote && item.marker === 'Y') {
           itemQuote = 'Quotenrelevant: Item darf NICHT zutreffen (Marker Y)';
         }
-        // Item-Soll-Quote (z.B. "max. 1 TN") direkt in Quote-Text einbauen
-        if (item.soll_quote) {
-          itemQuote = (itemQuote ? itemQuote + '\n' : '') + `• ${item.soll_quote}`;
+        // Item-Soll-Quote (v11: Liste mit gilt_fuer_gruppen-Filter)
+        const itemQuotes = getSollQuoteList(item.soll_quote);
+        for (const q of itemQuotes) {
+          if (Array.isArray(q.gilt_fuer_gruppen) && q.gilt_fuer_gruppen.length > 0) {
+            if (!q.gilt_fuer_gruppen.includes(gruppe.id)) continue;
+          }
+          itemQuote = (itemQuote ? itemQuote + '\n' : '') + `• ${q.text}`;
         }
         // Antworten pro Item: nutze item.antworten, fallback auf frage.antworten (Matrix-Skala)
         const rawAnts = (item.antworten && item.antworten.length) ? item.antworten : sharedAnswers;
@@ -844,7 +1001,7 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
       const compactHint = (compactMatrix && otherItems.length > 0)
         ? ` [kompakt: ${itemsToColumns.length}/${frage.items.length} relevante Items]`
         : '';
-      mh.value = (frage.fragetext || frage.id) + compactHint;
+      mh.value = (frage.kurz_label || frage.fragetext || frage.id) + compactHint;
       mh.font = { name: 'Arial', size: 10, bold: true };
       mh.alignment = { horizontal: 'center', vertical: 'center', wrapText: true };
       mh.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: COLORS.MATRIX_HDR } };
@@ -853,12 +1010,26 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
     } else if (frage.typ === 'freitext' || frage.typ === 'numerisch') {
       // Freitext / Numerisch: nur Header, keine Antwort-Codes
       const note = frage.bedingung ? `Bedingung: ${frage.bedingung}` : (frage.fragetext || '');
-      const label = frage.id ? `${frage.id}. ${frage.kurzlabel || frage.fragetext || ''}`.substring(0, 60) : (frage.fragetext || '');
+      const label = buildHeaderLabel(frage);
       writeQuestionColumn(ws, currentCol, label, note, null, null, tnEnd, gruppe, frage, true, allGruppen);
+      currentCol++;
+    } else if (frage.typ === 'tool_input') {
+      // v11: Algorithmus-Eingabe-Skala (z.B. JPM Q12a) — 1 Sammelspalte
+      const label = buildHeaderLabel(frage);
+      const itemList = (frage.items || []).map(it => `• ${it.item_label || ''}`).join('\n');
+      const note = `MUTTERFRAGE: ${frage.fragetext || ''}\n\n` +
+                   `Algorithmus-Eingabe — Antworten in das externe Segmentierungs-Tool eingeben.\n\n` +
+                   (itemList ? `Items:\n${itemList}\n\n` : '') +
+                   (frage.quotenkommentar || '');
+      const quoteText = frage.quotenkommentar
+        || 'Eingabe in Segmentierungs-Tool — Ergebnis: Segment';
+      writeQuestionColumn(ws, currentCol, label + ' (Tool)', note,
+                          [], quoteText, tnEnd, gruppe, frage, true, allGruppen);
+      ws.getColumn(currentCol).width = 30;
       currentCol++;
     } else {
       // single_choice, multi_choice, ranking
-      const label = frage.id ? `${frage.id}. ${frage.fragetext || ''}` : (frage.fragetext || '');
+      const label = buildHeaderLabel(frage);
       const note = frage.bedingung ? `Bedingung: ${frage.bedingung}` : '';
       let quoteText = frage.quotenkommentar || frage.bedingung || '';
       // Auto-Quote-Hinweis für F1 (Geschlecht) und F2 (Alter) aus Gruppen-Daten
@@ -879,6 +1050,17 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
   // Höhere Zeilen für Matrix-Header und Frage-Header
   ws.getRow(MATRIX_HEADER_ROW).height = 32;
   ws.getRow(HEADER_ROW).height = 75;
+
+  // v11: IDI-Profile, Segment-Beschreibungen und Studien-Quoten in Spalte G ausspielen
+  // (wenn vorhanden in opts)
+  if (opts.idiProfile || opts.segment_beschreibungen || opts.studien_quoten) {
+    writeIdiInfoBlock(ws, {
+      idiProfile: opts.idiProfile,
+      segment_beschreibungen: opts.segment_beschreibungen,
+      studien_quoten: opts.studien_quoten,
+      tnEnd,
+    });
+  }
 
   // Freeze Panes komplett deaktiviert — User scrollt frei in alle Richtungen
   ws.views = [{ state: 'normal' }];
@@ -904,12 +1086,21 @@ export default async function handler(req, res) {
       fragen,
       compactMatrix,            // PATCH 1: optionaler Toggle aus dem Form
       compactMatrixThreshold,   // optional: Item-Schwellwert (Default 5)
+      // v11: IDI-Profile + Segment-Beschreibungen + Studien-Quoten
+      idiProfile,
+      segment_beschreibungen,
+      studien_quoten,
     } = req.body ?? {};
 
     const auftraggeber = kundenname || projektname || '';
     const builderOptions = {
       compactMatrix: compactMatrix === true || compactMatrix === 'true',
       compactMatrixThreshold: parseInt(compactMatrixThreshold) || 5,
+      // v11: nur in IDI-Sheets durchreichen
+      idiProfile: Array.isArray(idiProfile) ? idiProfile : null,
+      segment_beschreibungen: (segment_beschreibungen && typeof segment_beschreibungen === 'object')
+        ? segment_beschreibungen : null,
+      studien_quoten: Array.isArray(studien_quoten) ? studien_quoten : null,
     };
 
     if (!templateBase64) return res.status(400).json({ error: 'Missing templateBase64' });
@@ -934,7 +1125,7 @@ export default async function handler(req, res) {
     result.created = new Date();
     const newSheetNames = [];
 
-    const processGruppe = (gruppe, sheetName, fragenFG) => {
+    const processGruppe = (gruppe, sheetName, fragenFG, includeIdiInfo) => {
       const dstWs = result.addWorksheet(sheetName);
       copyWorksheet(srcWs, dstWs);
 
@@ -946,16 +1137,22 @@ export default async function handler(req, res) {
 
       addConditionalFormats(dstWs, tnEnd);
       addLogo(dstWs, result, gruppe.unternehmen, setting);
+
+      // v11: nur dem IDI/VDI-Sheet die IDI-Info-Blöcke geben
+      const sheetOptions = includeIdiInfo
+        ? builderOptions
+        : { ...builderOptions, idiProfile: null, segment_beschreibungen: null, studien_quoten: null };
+
       fillSheet(
         dstWs, gruppe, fragenFG, projektnummer, projektname,
-        auftraggeber, setting, methodeFG, quoteStartCol, gruppen, builderOptions
+        auftraggeber, setting, methodeFG, quoteStartCol, gruppen, sheetOptions
       );
       newSheetNames.push({ sheet: sheetName, quoteStartCol, brutto, tnEnd });
     };
 
     if (isIDI) {
       const hauptGruppe = { ...gruppen[0], methode };
-      processGruppe(hauptGruppe, methode === 'VDI' ? 'VDIs' : 'IDIs', fragenArr);
+      processGruppe(hauptGruppe, methode === 'VDI' ? 'VDIs' : 'IDIs', fragenArr, true);
     } else {
       for (const gruppe of gruppen) {
         gruppe.methode = gruppe.methode || methode;
@@ -965,7 +1162,7 @@ export default async function handler(req, res) {
           f.relevantFuerGruppen.includes('alle') ||
           f.relevantFuerGruppen.includes(gruppe.id)
         );
-        processGruppe(gruppe, sheetName, fragenFG);
+        processGruppe(gruppe, sheetName, fragenFG, false);
       }
     }
 
@@ -1010,7 +1207,12 @@ export default async function handler(req, res) {
         blobError,
         compactMatrix: builderOptions.compactMatrix,
         compactMatrixThreshold: builderOptions.compactMatrixThreshold,
-        version: 'v10-screener-robust',
+        // v11
+        idiProfileCount: builderOptions.idiProfile?.length || 0,
+        segmentBeschreibungenCount: builderOptions.segment_beschreibungen
+          ? Object.keys(builderOptions.segment_beschreibungen).length : 0,
+        studienQuotenCount: builderOptions.studien_quoten?.length || 0,
+        version: 'v11-universal',
       },
     });
   } catch (err) {
@@ -1022,7 +1224,7 @@ export default async function handler(req, res) {
       error: err?.message || 'Unknown error',
       errorType: err?.name || 'Error',
       stack: err?.stack ? String(err.stack).split('\n').slice(0, 8) : null,
-      version: 'v10-screener-robust',
+      version: 'v11-universal',
     });
   }
 }
