@@ -1,5 +1,5 @@
 // api/build-preview.js
-// Preview Generator – Excel Builder v8 (template-aware headers)
+// Preview Generator – Excel Builder v10 (screener-robust)
 //
 // Layout-Konzept:
 //   Z1-4:    Header (Studio, Kunde, Projekt) — aus Template
@@ -1013,3 +1013,16 @@ export default async function handler(req, res) {
         version: 'v10-screener-robust',
       },
     });
+  } catch (err) {
+    console.error('Error in build-preview:', err);
+    console.error('Stack:', err?.stack);
+    // Strukturierte Fehlerantwort, damit n8n nicht nur "500" sieht
+    return res.status(500).json({
+      success: false,
+      error: err?.message || 'Unknown error',
+      errorType: err?.name || 'Error',
+      stack: err?.stack ? String(err.stack).split('\n').slice(0, 8) : null,
+      version: 'v10-screener-robust',
+    });
+  }
+}
