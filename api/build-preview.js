@@ -1111,6 +1111,89 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
         if (s.numFmt)    cell.numFmt    = s.numFmt;
       }
     }
+
+    // v11.6: Merges und Data Validations aus dem Template-TN-Bereich extrahieren
+    // und für die neuen Zeilen replizieren.
+    //
+    // (a) Merges: alle Merges im Bereich TN_START..lastFormattedTnRow analysieren
+    //     und je Zeile-Block (z.B. G7:H7) für jede neue Zeile ergänzen.
+    //     Merge-Pattern (G7:H7) wird repliziert auf G17:H17, G18:H18, ...
+    const templateMergePatterns = [];
+    // Quelle 1: preMerges (vom XML-Parser, zuverlässig)
+    const preMergesList = Array.isArray(opts.preMerges) ? opts.preMerges : [];
+    // Quelle 2: model.merges
+    const modelMergesList = Array.isArray(ws.model?.merges) ? ws.model.merges : [];
+    // Quelle 3: _merges-Object
+    const oldMergesList = (ws._merges && typeof ws._merges === 'object' && !(ws._merges instanceof Map))
+      ? Object.keys(ws._merges) : [];
+    const allMergeStrings = [...new Set([...preMergesList, ...modelMergesList, ...oldMergesList])];
+    for (const m of allMergeStrings) {
+      if (typeof m !== 'string') continue;
+      const match = m.match(/^([A-Z]+)(\d+):([A-Z]+)(\d+)$/i);
+      if (!match) continue;
+      const [_, c1, r1str, c2, r2str] = match;
+      const r1 = parseInt(r1str), r2 = parseInt(r2str);
+      // Nur einzeilige Merges innerhalb des TN-Bereichs sind Kandidaten
+      if (r1 === r2 && r1 >= TN_START && r1 <= lastFormattedTnRow) {
+        templateMergePatterns.push({ c1: c1.toUpperCase(), c2: c2.toUpperCase(), srcRow: r1 });
+      }
+    }
+    // Pattern: für jede Spalten-Kombo, die in genau EINER Template-Zeile vorkommt,
+    // auf alle neuen Zeilen anwenden. Dedup-Set über Spalten-Kombo.
+    const uniqueMergePatterns = new Map(); // key "c1-c2" → pattern
+    for (const p of templateMergePatterns) {
+      uniqueMergePatterns.set(`${p.c1}-${p.c2}`, p);
+    }
+    for (const p of uniqueMergePatterns.values()) {
+      for (let r = lastFormattedTnRow + 1; r <= tnEnd; r++) {
+        try { ws.mergeCells(`${p.c1}${r}:${p.c2}${r}`); } catch (e) {}
+      }
+    }
+
+    // (b) Data Validations: für Spalten, die im Template eine DV haben,
+    //     diese auf die neuen Zeilen erweitern.
+    //     ExcelJS speichert DVs als Map: address-string → DV-Objekt.
+    //     Wir suchen DVs auf Zellen wie "A7", "A10" etc. im Template-Bereich
+    //     und kopieren sie auf die neuen Zeilen mit gleicher Spalte.
+    const dvModel = ws.dataValidations?.model || ws.dataValidations || {};
+    const dvEntries = (typeof dvModel === 'object' && !Array.isArray(dvModel))
+      ? Object.entries(dvModel)
+      : [];
+    // Welche Spalten haben im Template eine DV?
+    const dvByCol = new Map(); // col-letter → DV-Objekt
+    for (const [sqref, dv] of dvEntries) {
+      if (!sqref || !dv) continue;
+      // sqref kann sein: "A7", "A7:A16", "A7 B7" oder mehrere Bereiche.
+      // Wir splitten an Leerzeichen und Komma.
+      const refs = String(sqref).split(/[\s,]+/);
+      for (const ref of refs) {
+        const m = ref.match(/^([A-Z]+)(\d+)(?::([A-Z]+)(\d+))?$/i);
+        if (!m) continue;
+        const c1 = m[1].toUpperCase();
+        const r1 = parseInt(m[2]);
+        const c2 = (m[3] || c1).toUpperCase();
+        const r2 = m[4] ? parseInt(m[4]) : r1;
+        // Nur einspaltige DVs im TN-Bereich sind Kandidaten
+        if (c1 === c2 && r1 >= TN_START && r2 <= lastFormattedTnRow) {
+          dvByCol.set(c1, dv);
+        }
+      }
+    }
+    // DVs auf neue Zeilen anwenden
+    for (const [colLetter, dv] of dvByCol.entries()) {
+      let dvClone;
+      try { dvClone = JSON.parse(JSON.stringify(dv)); } catch (e) { dvClone = { ...dv }; }
+      for (let r = lastFormattedTnRow + 1; r <= tnEnd; r++) {
+        try {
+          const addr = `${colLetter}${r}`;
+          if (typeof ws.dataValidations?.add === 'function') {
+            ws.dataValidations.add(addr, dvClone);
+          } else if (ws.dataValidations?.model) {
+            ws.dataValidations.model[addr] = dvClone;
+          }
+        } catch (e) {}
+      }
+    }
   }
 
   for (let r = TN_START; r <= tnEnd; r++) {
@@ -1447,6 +1530,9 @@ export default async function handler(req, res) {
 
     // v11.3: Merges aus rohem XLSX-Buffer parsen (umgeht ExcelJS-API-Quirks)
     const preMerges = await readMergesFromBuffer(templateBuffer, cfg.sheetName);
+    // v11.6: preMerges auch fillSheet zugänglich machen, damit es die TN-Bereich-
+    // Merges (z.B. G7:H7) auf neue Zeilen 11+ replizieren kann.
+    builderOptions.preMerges = preMerges;
 
     const result = new ExcelJS.Workbook();
     result.creator = 'Preview Generator';
@@ -1549,7 +1635,7 @@ export default async function handler(req, res) {
         terminBlocksCount: builderOptions.termin_blocks?.length || 0,
         laufzeitVon: builderOptions.laufzeitVon,
         laufzeitBis: builderOptions.laufzeitBis,
-        version: 'v11.5-tn-format-extension',
+        version: 'v11.6-tn-merges-dvs',
       },
     });
   } catch (err) {
@@ -1561,7 +1647,7 @@ export default async function handler(req, res) {
       error: err?.message || 'Unknown error',
       errorType: err?.name || 'Error',
       stack: err?.stack ? String(err.stack).split('\n').slice(0, 8) : null,
-      version: 'v11.5-tn-format-extension',
+      version: 'v11.6-tn-merges-dvs',
     });
   }
 }
