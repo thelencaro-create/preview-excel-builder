@@ -43,6 +43,17 @@
 // - P8: typ='tool_input' für Algorithmus-Skalen (1 Sammelspalte)
 import ExcelJS from "exceljs";
 import { LOGOS } from './logos.js';
+import { createRequire } from 'module';
+
+// JSZip ist Dependency von exceljs, daher sollte es immer verfügbar sein.
+// Wir laden über createRequire um async-import-Probleme zu vermeiden.
+let JSZip;
+try {
+  const require_ = createRequire(import.meta.url);
+  JSZip = require_('jszip');
+} catch (e) {
+  console.warn('JSZip nicht verfügbar — Merge-Parser nutzt ExcelJS-Fallback');
+}
 
 // ---------------------------------------------------------------------------
 // 1) KONFIGURATION
@@ -191,7 +202,52 @@ function borderWithThickRight(baseBorder) {
 // 3) HILFSFUNKTIONEN
 // ---------------------------------------------------------------------------
 
-function copyWorksheet(srcWs, dstWs) {
+// v11.3: Liest Merge-Ranges direkt aus dem rohen XLSX-Buffer (ZIP+XML).
+// Das umgeht alle ExcelJS-API-Inkonsistenzen — die mergeCell-Tags stehen
+// garantiert in der sheet*.xml und können über Regex extrahiert werden.
+//
+// sheetIndex: 1-basiert (sheet1.xml = erstes Sheet, sheet2.xml = zweites...)
+// sheetName:  Optionaler Name; wenn gegeben, wird der Index aus workbook.xml geholt
+async function readMergesFromBuffer(buffer, sheetName) {
+  if (!JSZip) return [];
+  try {
+    const zip = await JSZip.loadAsync(buffer);
+    // 1) sheet-Index ermitteln aus workbook.xml
+    let sheetIndex = 1;
+    if (sheetName) {
+      const wbXml = await zip.file('xl/workbook.xml')?.async('string');
+      if (wbXml) {
+        // <sheet name="VDIs" sheetId="3" r:id="rId3"/>
+        // Match: <sheet name="VDIs" ... r:id="rIdX"/>
+        const re = new RegExp(`<sheet[^>]*name="${sheetName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}"[^>]*r:id="rId(\\d+)"`, 'i');
+        const m = wbXml.match(re);
+        if (m) {
+          // r:id ist nicht 1:1 sheet-Index! Wir lesen es aus workbook.xml.rels
+          const relsXml = await zip.file('xl/_rels/workbook.xml.rels')?.async('string');
+          if (relsXml) {
+            const relRe = new RegExp(`<Relationship[^>]*Id="rId${m[1]}"[^>]*Target="(?:worksheets/)?sheet(\\d+)\\.xml"`, 'i');
+            const relMatch = relsXml.match(relRe);
+            if (relMatch) sheetIndex = parseInt(relMatch[1], 10);
+          }
+        }
+      }
+    }
+    const sheetXml = await zip.file(`xl/worksheets/sheet${sheetIndex}.xml`)?.async('string');
+    if (!sheetXml) return [];
+    // <mergeCell ref="L1:M1"/>
+    const merges = [];
+    const re = /<mergeCell\s+ref="([^"]+)"\s*\/>/gi;
+    let match;
+    while ((match = re.exec(sheetXml)) !== null) {
+      merges.push(match[1]);
+    }
+    return merges;
+  } catch (e) {
+    return [];
+  }
+}
+
+function copyWorksheet(srcWs, dstWs, preMerges) {
   srcWs.columns.forEach((col, i) => {
     const dstCol = dstWs.getColumn(i + 1);
     if (col.width)  dstCol.width  = col.width;
@@ -221,25 +277,56 @@ function copyWorksheet(srcWs, dstWs) {
     dstRow.commit();
   });
 
-  // v11.3: Merges robust kopieren — funktioniert für alle ExcelJS-Versionen
-  // (alte _merges Object, neue _merges Map, model.merges Array)
+  // v11.3: Merges robust kopieren — Priorität:
+  //  1. preMerges (vom Caller via XML-Parser geliefert) ← garantiert vollständig
+  //  2. ExcelJS-API (drei Varianten: _merges Object, Map, model.merges)
+  //  3. Cell-Iteration (cell.isMerged + master)
   const mergeRanges = new Set();
+  // Variante 0: vom Caller vorab geparst (XML-Buffer-Lesung)
+  if (Array.isArray(preMerges) && preMerges.length > 0) {
+    for (const m of preMerges) mergeRanges.add(m);
+  }
   // Variante 1: _merges als Object mit Range-Keys
-  if (srcWs._merges && typeof srcWs._merges === 'object' && !(srcWs._merges instanceof Map)) {
+  if (mergeRanges.size === 0 && srcWs._merges && typeof srcWs._merges === 'object' && !(srcWs._merges instanceof Map)) {
     for (const key of Object.keys(srcWs._merges)) {
       mergeRanges.add(key);
     }
   }
   // Variante 2: _merges als Map
-  if (srcWs._merges instanceof Map) {
+  if (mergeRanges.size === 0 && srcWs._merges instanceof Map) {
     for (const key of srcWs._merges.keys()) {
       mergeRanges.add(key);
     }
   }
-  // Variante 3: model.merges als Array (häufig bei neueren ExcelJS-Versionen)
-  if (Array.isArray(srcWs.model?.merges)) {
+  // Variante 3: model.merges als Array
+  if (mergeRanges.size === 0 && Array.isArray(srcWs.model?.merges)) {
     for (const m of srcWs.model.merges) {
       if (typeof m === 'string') mergeRanges.add(m);
+    }
+  }
+  // Variante 4: Cell-Iteration über isMerged
+  if (mergeRanges.size === 0) {
+    const merges = new Map();
+    srcWs.eachRow({ includeEmpty: true }, (row, rn) => {
+      row.eachCell({ includeEmpty: true }, (cell, cn) => {
+        if (cell.isMerged && cell.master) {
+          const masterAddr = cell.master.address;
+          if (!merges.has(masterAddr)) {
+            merges.set(masterAddr, { minR: rn, maxR: rn, minC: cn, maxC: cn });
+          }
+          const m = merges.get(masterAddr);
+          if (rn > m.maxR) m.maxR = rn;
+          if (cn > m.maxC) m.maxC = cn;
+          if (rn < m.minR) m.minR = rn;
+          if (cn < m.minC) m.minC = cn;
+        }
+      });
+    });
+    for (const m of merges.values()) {
+      try {
+        const range = `${colLetterFromIndex(m.minC)}${m.minR}:${colLetterFromIndex(m.maxC)}${m.maxR}`;
+        mergeRanges.add(range);
+      } catch (e) {}
     }
   }
   for (const range of mergeRanges) {
@@ -631,7 +718,7 @@ function partitionMatrixItems(items, compactMatrix, compactThreshold) {
 }
 
 // Schreibt eine einzelne Frage-Spalte (oder Item-Spalte einer Matrix)
-function writeQuestionColumn(ws, col, label, note, antList, quoteText, tnEnd, gruppe, frage, isLastInGroup, allGruppen) {
+function writeQuestionColumn(ws, col, label, note, antList, quoteText, tnEnd, gruppe, frage, isLastInGroup, allGruppen, quoteRow) {
   ws.getColumn(col).width = 22;
 
   // Border-Variante je nachdem ob diese Spalte das Ende einer Frage/Matrix ist
@@ -698,7 +785,11 @@ function writeQuestionColumn(ws, col, label, note, antList, quoteText, tnEnd, gr
   const subQuoteList = buildSubQuoteList(antList, frage, gruppe, allGruppen);
   const finalQuoteText = [cleanedQuote, subQuoteList].filter(Boolean).join('\n');
   if (finalQuoteText) {
-    const qc = ws.getCell(row, col);
+    // v11.3: Wenn quoteRow vom Caller übergeben wurde, an dieser einheitlichen
+    // Position schreiben (1 Zeile Abstand unter der längsten Antwort-Liste);
+    // sonst wie bisher direkt nach den Antworten dieser Spalte
+    const targetRow = quoteRow || row;
+    const qc = ws.getCell(targetRow, col);
     qc.value = finalQuoteText;
     qc.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: COLORS.GRUEN } };
     qc.font = { name: 'Arial', size: 9, bold: true, color: { argb: COLORS.QUOTE_FONT } };
@@ -707,7 +798,9 @@ function writeQuestionColumn(ws, col, label, note, antList, quoteText, tnEnd, gr
     // Zeilenhöhe der Quote-Zeile dynamisch erhöhen, wenn mehrzeilig
     const lineCount = finalQuoteText.split('\n').length;
     if (lineCount > 1) {
-      ws.getRow(row).height = Math.min(15 + lineCount * 14, 200);
+      const currentH = ws.getRow(targetRow).height || 15;
+      const neededH = Math.min(15 + lineCount * 14, 200);
+      if (neededH > currentH) ws.getRow(targetRow).height = neededH;
     }
   }
 }
@@ -920,6 +1013,29 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
   }
 
   // 6) Fragen-Spalten aufbauen
+  //
+  // v11.3: Vorab Max-Antwort-Anzahl ermitteln, damit alle grünen Quote-Zellen
+  // auf einer einheitlichen Höhe stehen (1 Zeile unter der längsten Antwort-Liste)
+  let maxAnswers = 0;
+  for (const f of (fragen || [])) {
+    if (f.typ === 'entfaellt' || f.kategorie === 'entfaellt' || f.kategorie === 'verfuegbarkeit') continue;
+    // Filter: relevantFuerGruppen
+    if (Array.isArray(f.relevantFuerGruppen) && f.relevantFuerGruppen.length
+        && !f.relevantFuerGruppen.includes('alle')
+        && !f.relevantFuerGruppen.includes(gruppe.id)) continue;
+    if (Array.isArray(f.antworten)) {
+      maxAnswers = Math.max(maxAnswers, f.antworten.length);
+    }
+    if (Array.isArray(f.items)) {
+      for (const it of f.items) {
+        const itemAnts = (it.antworten && it.antworten.length) ? it.antworten : (f.antworten || []);
+        maxAnswers = Math.max(maxAnswers, itemAnts.length);
+      }
+    }
+  }
+  // Quote-Zeile = 1 Leerzeile nach der längsten Antwort-Liste
+  const uniformQuoteRow = tnEnd + ANT_OFFSET + maxAnswers + 1;
+
   let currentCol = quoteStartCol;
   for (const frage of (fragen || [])) {
     // Sicherheitsnetz: Fragen mit kategorie='entfaellt' oder 'verfuegbarkeit'
@@ -993,7 +1109,7 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
                      (item.screenout_codes || []).map(String).includes(String(a.code)),
         }));
         writeQuestionColumn(ws, currentCol, item.item_label || '', itemNote,
-                            ants, itemQuote, tnEnd, gruppe, frage, isLast, allGruppen);
+                            ants, itemQuote, tnEnd, gruppe, frage, isLast, allGruppen, uniformQuoteRow);
         currentCol++;
       }
 
@@ -1009,7 +1125,7 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
         // Quote-Text: Hinweis auf Sammelspalte
         const summaryQuote = `Sammelspalte: ${otherItems.length} weitere Items (siehe Tooltip)\nKein Screenout, kein Quoten-Marker.`;
         writeQuestionColumn(ws, currentCol, summaryLabel, summaryNote,
-                            summaryAnts, summaryQuote, tnEnd, gruppe, frage, true, allGruppen);
+                            summaryAnts, summaryQuote, tnEnd, gruppe, frage, true, allGruppen, uniformQuoteRow);
         // Sammelspalte etwas breiter machen
         ws.getColumn(currentCol).width = 28;
         currentCol++;
@@ -1037,7 +1153,7 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
       // Freitext / Numerisch: nur Header, keine Antwort-Codes
       const note = frage.bedingung ? `Bedingung: ${frage.bedingung}` : (frage.fragetext || '');
       const label = buildHeaderLabel(frage);
-      writeQuestionColumn(ws, currentCol, label, note, null, null, tnEnd, gruppe, frage, true, allGruppen);
+      writeQuestionColumn(ws, currentCol, label, note, null, null, tnEnd, gruppe, frage, true, allGruppen, uniformQuoteRow);
       currentCol++;
     } else if (frage.typ === 'tool_input') {
       // v11: Algorithmus-Eingabe-Skala (z.B. JPM Q12a) — 1 Sammelspalte
@@ -1050,7 +1166,7 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
       const quoteText = frage.quotenkommentar
         || 'Eingabe in Segmentierungs-Tool — Ergebnis: Segment';
       writeQuestionColumn(ws, currentCol, label + ' (Tool)', note,
-                          [], quoteText, tnEnd, gruppe, frage, true, allGruppen);
+                          [], quoteText, tnEnd, gruppe, frage, true, allGruppen, uniformQuoteRow);
       ws.getColumn(currentCol).width = 30;
       currentCol++;
     } else {
@@ -1068,7 +1184,7 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
         }
       }
       writeQuestionColumn(ws, currentCol, label, note,
-                          frage.antworten, quoteText, tnEnd, gruppe, frage, true, allGruppen);
+                          frage.antworten, quoteText, tnEnd, gruppe, frage, true, allGruppen, uniformQuoteRow);
       currentCol++;
     }
   }
@@ -1136,8 +1252,9 @@ export default async function handler(req, res) {
     const setting = (methode === 'VGD' || methode === 'VDI') ? 'online' : 'offline';
     const cfg = SHEET_CONFIG[methode] || SHEET_CONFIG['GD'];
 
+    const templateBuffer = Buffer.from(templateBase64, 'base64');
     const template = new ExcelJS.Workbook();
-    await template.xlsx.load(Buffer.from(templateBase64, 'base64'));
+    await template.xlsx.load(templateBuffer);
     const srcWs = template.getWorksheet(cfg.sheetName);
     if (!srcWs) {
       return res.status(400).json({
@@ -1146,6 +1263,9 @@ export default async function handler(req, res) {
       });
     }
 
+    // v11.3: Merges aus rohem XLSX-Buffer parsen (umgeht ExcelJS-API-Quirks)
+    const preMerges = await readMergesFromBuffer(templateBuffer, cfg.sheetName);
+
     const result = new ExcelJS.Workbook();
     result.creator = 'Preview Generator';
     result.created = new Date();
@@ -1153,7 +1273,7 @@ export default async function handler(req, res) {
 
     const processGruppe = (gruppe, sheetName, fragenFG, includeIdiInfo) => {
       const dstWs = result.addWorksheet(sheetName);
-      copyWorksheet(srcWs, dstWs);
+      copyWorksheet(srcWs, dstWs, preMerges);
 
       const methodeFG = gruppe.methode || methode;
       const cfgFG = SHEET_CONFIG[methodeFG] || SHEET_CONFIG['GD'];
@@ -1238,6 +1358,9 @@ export default async function handler(req, res) {
         segmentBeschreibungenCount: builderOptions.segment_beschreibungen
           ? Object.keys(builderOptions.segment_beschreibungen).length : 0,
         studienQuotenCount: builderOptions.studien_quoten?.length || 0,
+        // v11.3 NEU: Merges aus dem rohen Template-Buffer
+        preMergesCount: preMerges?.length || 0,
+        preMerges: preMerges || [],
         version: 'v11.3-merges-fixed',
       },
     });
