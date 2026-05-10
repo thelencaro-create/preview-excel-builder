@@ -1057,6 +1057,62 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
   const lfdHeader = ws.getCell(HEADER_ROW, lfdCol);
   lfdHeader.note = `Brutto: ${brutto} TN\nNetto: ${netto} TN\n→ ${brutto} für ${netto}`;
   const blackBottom = { style: 'medium', color: { argb: 'FF000000' } };
+
+  // v11.4: Wenn brutto > Anzahl vorformatierter TN-Zeilen im Template, müssen
+  // wir das Format der letzten formatierten Zeile auf alle weiteren propagieren
+  // (Höhe, Borders, Fills, Fonts pro Spalte)
+  //
+  // Detektion: alle TN-Zeilen mit row.height >= 20 zählen als formatiert
+  let lastFormattedTnRow = TN_START;
+  for (let r = TN_START; r <= TN_START + 30; r++) {
+    const h = ws.getRow(r).height;
+    if (h && h >= 20) {
+      lastFormattedTnRow = r;
+    } else if (r > TN_START && (!h || h < 20)) {
+      break; // erste unformatierte Zeile gefunden, abbrechen
+    }
+  }
+  // Wenn brutto mehr Zeilen braucht als vorformatiert → kopiere Style der
+  // letzten formatierten Zeile auf alle neuen Zeilen
+  if (tnEnd > lastFormattedTnRow) {
+    const templateRow = ws.getRow(lastFormattedTnRow);
+    const templateHeight = templateRow.height;
+    // Höchste Spalte mit Style/Inhalt in der Vorlagen-Zeile finden
+    let maxCol = quoteStartCol; // mindestens bis Frage-Bereich
+    templateRow.eachCell({ includeEmpty: true }, (cell, colNum) => {
+      if (cell.font || cell.fill?.fgColor || cell.border?.top || cell.value !== null) {
+        if (colNum > maxCol) maxCol = colNum;
+      }
+    });
+    // Pro Spalte den Style der letzten formatierten Zelle merken
+    const colStyles = new Map();
+    for (let col = 1; col <= maxCol; col++) {
+      const tcell = ws.getCell(lastFormattedTnRow, col);
+      colStyles.set(col, {
+        font: tcell.font ? { ...tcell.font } : undefined,
+        fill: tcell.fill ? JSON.parse(JSON.stringify(tcell.fill)) : undefined,
+        border: tcell.border ? JSON.parse(JSON.stringify(tcell.border)) : undefined,
+        alignment: tcell.alignment ? { ...tcell.alignment } : undefined,
+        numFmt: tcell.numFmt,
+      });
+    }
+    // Auf neue Zeilen anwenden
+    for (let r = lastFormattedTnRow + 1; r <= tnEnd; r++) {
+      const newRow = ws.getRow(r);
+      if (templateHeight) newRow.height = templateHeight;
+      for (let col = 1; col <= maxCol; col++) {
+        const cell = ws.getCell(r, col);
+        const s = colStyles.get(col);
+        if (!s) continue;
+        if (s.font)      cell.font      = { ...s.font };
+        if (s.fill)      cell.fill      = JSON.parse(JSON.stringify(s.fill));
+        if (s.border)    cell.border    = JSON.parse(JSON.stringify(s.border));
+        if (s.alignment) cell.alignment = { ...s.alignment };
+        if (s.numFmt)    cell.numFmt    = s.numFmt;
+      }
+    }
+  }
+
   for (let r = TN_START; r <= tnEnd; r++) {
     const c = ws.getCell(r, lfdCol);
     c.value = r - TN_START + 1;
@@ -1493,7 +1549,7 @@ export default async function handler(req, res) {
         terminBlocksCount: builderOptions.termin_blocks?.length || 0,
         laufzeitVon: builderOptions.laufzeitVon,
         laufzeitBis: builderOptions.laufzeitBis,
-        version: 'v11.4-soziodemo-termine',
+        version: 'v11.5-tn-format-extension',
       },
     });
   } catch (err) {
@@ -1505,7 +1561,7 @@ export default async function handler(req, res) {
       error: err?.message || 'Unknown error',
       errorType: err?.name || 'Error',
       stack: err?.stack ? String(err.stack).split('\n').slice(0, 8) : null,
-      version: 'v11.4-soziodemo-termine',
+      version: 'v11.5-tn-format-extension',
     });
   }
 }
