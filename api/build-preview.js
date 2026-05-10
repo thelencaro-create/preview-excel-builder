@@ -1196,10 +1196,24 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
     }
   }
 
+  // v11.6: Vertikales Alignment ALLER TN-Zellen final auf 'top' setzen
+  // (auch nach allen Style-Propagationen). Erstreckt sich über alle Zeilen
+  // und alle Spalten links der Quote-Spalten.
+  for (let r = TN_START; r <= tnEnd; r++) {
+    for (let col = 1; col < quoteStartCol; col++) {
+      const c = ws.getCell(r, col);
+      const a = c.alignment || {};
+      c.alignment = {
+        ...a,
+        vertical: 'top',
+      };
+    }
+  }
+
   for (let r = TN_START; r <= tnEnd; r++) {
     const c = ws.getCell(r, lfdCol);
     c.value = r - TN_START + 1;
-    c.alignment = { horizontal: 'center', vertical: 'center' };
+    c.alignment = { horizontal: 'center', vertical: 'top' };
     c.font = { name: 'Arial', size: 10, bold: true };
     if (r === tnEnd) {
       // Defensive: explizites Border-Objekt statt Spread auf ExcelJS-Property
@@ -1240,13 +1254,13 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
           if (cols.datum && block.datum) {
             const c = ws.getCell(row, cols.datum);
             c.value = String(block.datum);
-            c.alignment = { horizontal: 'center', vertical: 'center' };
+            c.alignment = { horizontal: 'center', vertical: 'top' };
             c.font = { name: 'Arial', size: 10 };
           }
           if (cols.uhrzeit && block.uhrzeit) {
             const c = ws.getCell(row, cols.uhrzeit);
             c.value = String(block.uhrzeit);
-            c.alignment = { horizontal: 'center', vertical: 'center' };
+            c.alignment = { horizontal: 'center', vertical: 'top' };
             c.font = { name: 'Arial', size: 10 };
           }
         }
