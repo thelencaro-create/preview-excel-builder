@@ -438,6 +438,19 @@ function findLfdNrCol(ws, fallback) {
   return foundCol || fallback;
 }
 
+// v11.4: Findet Spalten-Indizes für Datum / Uhrzeit-Spalten in Z6
+// Liefert {datum, uhrzeit} mit Spalten-Indizes (1-basiert) oder null
+function findDatumUhrzeitCols(ws) {
+  const row6 = ws.getRow(HEADER_ROW);
+  let datumCol = null, uhrzeitCol = null;
+  row6.eachCell({ includeEmpty: false }, (cell, colNum) => {
+    const v = String(cell.value ?? '').trim().toLowerCase();
+    if (datumCol === null && /^(datum|date)$/i.test(v)) datumCol = colNum;
+    if (uhrzeitCol === null && /^(uhrzeit|zeit|time)$/i.test(v)) uhrzeitCol = colNum;
+  });
+  return { datum: datumCol, uhrzeit: uhrzeitCol };
+}
+
 // Tracking-Bereich aufräumen: Zeilen TN_END+1 bis ca. 30 in Spalten 1..QUOTE_START-1 leeren
 function clearTrackingArea(ws, tnEnd, quoteStartCol) {
   for (let r = tnEnd + 1; r <= 30; r++) {
@@ -901,19 +914,91 @@ function writeIdiInfoBlock(ws, opts) {
 //  - Bevorzugt frage.kurz_label (Parser-generiert, max ~30 Zeichen)
 //  - Fallback: frage.fragetext (gekürzt auf 60 Zeichen)
 //  - Frage-Nummer (id) wird vorangestellt, wenn nicht schon im kurz_label enthalten
+// v11.4: Soziodemographische Fragen sortieren — Geschlecht und Alter
+// IMMER ganz vorne, dann andere persoenliche_daten, dann themenbezogen.
+//
+// Die Ranking-Logik:
+//   0 = Geschlecht
+//   1 = Alter
+//   2 = andere persoenliche_daten (Familienstand, Kinder, Bildung, Beruf, ...)
+//   3 = themenbezogen
+//   4 = sonstige (verfuegbarkeit etc., werden vorher gefiltert)
+//
+// Innerhalb jeder Gruppe bleibt die ursprüngliche Reihenfolge (stabile Sortierung
+// per Index-Tag), damit z.B. Q1 Beruf vor Q5 Bildung erscheint, falls beide
+// "andere persoenliche_daten" sind.
+function sortFragenSoziodemoFirst(fragen) {
+  if (!Array.isArray(fragen)) return [];
+  const REGEX_GESCHLECHT = /(geschlecht|geschlechts[\s-]?identit|m[äa]nnlich.*weiblich)/i;
+  const REGEX_ALTER = /\balter\b|wie alt sind sie|altersgruppe/i;
+
+  const score = (f) => {
+    const txt = ((f.fragetext || '') + ' ' + (f.kurz_label || '')).toLowerCase();
+    if (REGEX_GESCHLECHT.test(txt)) return 0;
+    if (REGEX_ALTER.test(txt)) return 1;
+    if (f.kategorie === 'persoenliche_daten') return 2;
+    if (f.kategorie === 'themenbezogen') return 3;
+    return 4;
+  };
+
+  // Stabile Sortierung mit ursprünglichem Index als Tiebreaker
+  return [...fragen]
+    .map((f, i) => ({ f, i, s: score(f) }))
+    .sort((a, b) => a.s - b.s || a.i - b.i)
+    .map(x => x.f);
+}
+
+// v11.4: Reduziert ein zu langes kurz_label intelligent auf 1-2 Wörter.
+// Sinnvolle Strategien:
+//   - "Q1. Berufliches Ausschlusskriterium" → "Beruf"
+//   - "Q2g. Haushalts-Brutto-Einkommen" → "HHI"  (wenn als Abk. parsbar)
+//   - "Q5b. Berufstätigkeit" → "Berufstätigkeit"
+//   - "Q2d. Beziehungsstatus" → "Beziehung"
+//
+// Hauptstrategie: nimm das erste "Substantiv-artige" Wort, das mindestens
+// 4 Zeichen lang ist und kein Füllwort.
+function compactKurzLabel(label) {
+  if (!label) return label;
+  // Q-Nummer-Präfix entfernen (wird beim buildHeaderLabel wieder ergänzt)
+  let txt = label.replace(/^[FQ]\d+[a-z]?\.\s*/i, '').trim();
+  if (txt.length <= 20) return txt; // schon kurz genug
+  // Bekannte lange Phrasen → kurze Form
+  const REPLACEMENTS = [
+    [/\bBerufliche?s?\s+Ausschlusskriteri\w*/i, 'Beruf'],
+    [/\bHaushalts[\s-]?(Brutto[\s-]?)?Einkommen\b/i, 'HHI'],
+    [/\bPers[öo]nliche\s+Ersparnisse\b/i, 'Ersparnisse'],
+    [/\bAnlage[\s-]?Verm[öo]gen\b/i, 'IA'],
+    [/\bRegion\s+Deutschlands?\b/i, 'Region'],
+    [/\bBeziehungsstatus\b/i, 'Beziehung'],
+    [/\bKinder\s+im\s+Haushalt\b/i, 'Kinder'],
+    [/\bArbeitsstatus\b/i, 'Arbeit'],
+    [/\bGeschlechts[\s-]?Identit[äa]t\b/i, 'Geschlecht'],
+    [/\bAltersgruppe\b/i, 'Alter'],
+  ];
+  for (const [re, repl] of REPLACEMENTS) {
+    if (re.test(txt)) return repl;
+  }
+  // Fallback: erstes Wort über 5 Zeichen
+  const words = txt.split(/[\s\-]+/).filter(w => w.length >= 5 && !/^(eine?|der|die|das|den|dem|für|mit|von|bei|aus|und|oder|als|wie|was|sind|hat|hatte)$/i.test(w));
+  if (words.length > 0) return words[0];
+  return txt.substring(0, 25);
+}
+
 function buildHeaderLabel(frage) {
   const id = (frage.id || '').trim();
-  const kurz = (frage.kurz_label || frage.kurzlabel || '').trim();
+  let kurz = (frage.kurz_label || frage.kurzlabel || '').trim();
   const lang = (frage.fragetext || '').trim();
+  // v11.4: kurz_label intelligent reduzieren wenn zu lang
+  kurz = compactKurzLabel(kurz);
   if (kurz) {
     // Wenn kurz_label schon mit der ID startet, nicht doppelt
     if (id && !kurz.toLowerCase().startsWith(id.toLowerCase())) {
-      return `${id}. ${kurz}`.substring(0, 60);
+      return `${id}. ${kurz}`.substring(0, 40);
     }
-    return kurz.substring(0, 60);
+    return kurz.substring(0, 40);
   }
-  if (id && lang) return `${id}. ${lang}`.substring(0, 60);
-  return (lang || id).substring(0, 60);
+  if (id && lang) return `${id}. ${lang}`.substring(0, 40);
+  return (lang || id).substring(0, 40);
 }
 
 function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, setting, methode, quoteStartCol, allGruppen, options) {
@@ -1001,6 +1086,35 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
   lblCell.font = { name: 'Arial', size: 9, bold: true, italic: true, color: { argb: COLORS.QUOTE_FONT } };
   lblCell.alignment = { horizontal: 'center', vertical: 'center' };
 
+  // v11.4: Termin-Verteilung pro TN-Zeile (nur bei IDI mit termin_blocks)
+  // Beispiel: termin_blocks = [{tn_von:1, tn_bis:5, datum:'5.5.', uhrzeit:'10-15h'}, ...]
+  // → TN-Zeilen 1-5 (= rows TN_START..TN_START+4) bekommen Datum 5.5.
+  if (Array.isArray(opts.termin_blocks) && opts.termin_blocks.length > 0) {
+    const cols = findDatumUhrzeitCols(ws);
+    if (cols.datum || cols.uhrzeit) {
+      for (const block of opts.termin_blocks) {
+        const von = parseInt(block.tn_von) || 1;
+        const bis = parseInt(block.tn_bis) || von;
+        for (let tn = von; tn <= bis; tn++) {
+          const row = TN_START + tn - 1;
+          if (row > tnEnd) break;
+          if (cols.datum && block.datum) {
+            const c = ws.getCell(row, cols.datum);
+            c.value = String(block.datum);
+            c.alignment = { horizontal: 'center', vertical: 'center' };
+            c.font = { name: 'Arial', size: 10 };
+          }
+          if (cols.uhrzeit && block.uhrzeit) {
+            const c = ws.getCell(row, cols.uhrzeit);
+            c.value = String(block.uhrzeit);
+            c.alignment = { horizontal: 'center', vertical: 'center' };
+            c.font = { name: 'Arial', size: 10 };
+          }
+        }
+      }
+    }
+  }
+
   // 4) Tracking-Bereich rechts und unter TN ausnullen
   clearTrackingArea(ws, tnEnd, quoteStartCol);
 
@@ -1014,10 +1128,14 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
 
   // 6) Fragen-Spalten aufbauen
   //
+  // v11.4: Soziodemographische Fragen sortieren — Geschlecht + Alter immer
+  // zuerst, dann andere persönliche Daten, dann themenbezogen.
+  const sortedFragen = sortFragenSoziodemoFirst(fragen || []);
+
   // v11.3: Vorab Max-Antwort-Anzahl ermitteln, damit alle grünen Quote-Zellen
   // auf einer einheitlichen Höhe stehen (1 Zeile unter der längsten Antwort-Liste)
   let maxAnswers = 0;
-  for (const f of (fragen || [])) {
+  for (const f of sortedFragen) {
     if (f.typ === 'entfaellt' || f.kategorie === 'entfaellt' || f.kategorie === 'verfuegbarkeit') continue;
     // Filter: relevantFuerGruppen
     if (Array.isArray(f.relevantFuerGruppen) && f.relevantFuerGruppen.length
@@ -1037,7 +1155,7 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
   const uniformQuoteRow = tnEnd + ANT_OFFSET + maxAnswers + 1;
 
   let currentCol = quoteStartCol;
-  for (const frage of (fragen || [])) {
+  for (const frage of sortedFragen) {
     // Sicherheitsnetz: Fragen mit kategorie='entfaellt' oder 'verfuegbarkeit'
     // werden übersprungen, auch wenn typ noch single_choice ist.
     if (frage.typ === 'entfaellt' || 
@@ -1232,6 +1350,10 @@ export default async function handler(req, res) {
       idiProfile,
       segment_beschreibungen,
       studien_quoten,
+      // v11.4: Termin-Blöcke (für Datum/Uhrzeit pro TN-Zeile bei IDI)
+      termin_blocks,
+      laufzeitVon,
+      laufzeitBis,
     } = req.body ?? {};
 
     const auftraggeber = kundenname || projektname || '';
@@ -1243,6 +1365,10 @@ export default async function handler(req, res) {
       segment_beschreibungen: (segment_beschreibungen && typeof segment_beschreibungen === 'object')
         ? segment_beschreibungen : null,
       studien_quoten: Array.isArray(studien_quoten) ? studien_quoten : null,
+      // v11.4: Termin-Blöcke für TN-Zeilen-Verteilung
+      termin_blocks: Array.isArray(termin_blocks) ? termin_blocks : null,
+      laufzeitVon: laufzeitVon || '',
+      laufzeitBis: laufzeitBis || '',
     };
 
     if (!templateBase64) return res.status(400).json({ error: 'Missing templateBase64' });
@@ -1285,9 +1411,11 @@ export default async function handler(req, res) {
       addLogo(dstWs, result, gruppe.unternehmen, setting);
 
       // v11: nur dem IDI/VDI-Sheet die IDI-Info-Blöcke geben
+      // v11.4: termin_blocks ebenfalls nur bei IDI (bei GD pro Sheet 1 Termin im Header)
       const sheetOptions = includeIdiInfo
         ? builderOptions
-        : { ...builderOptions, idiProfile: null, segment_beschreibungen: null, studien_quoten: null };
+        : { ...builderOptions, idiProfile: null, segment_beschreibungen: null,
+            studien_quoten: null, termin_blocks: null };
 
       fillSheet(
         dstWs, gruppe, fragenFG, projektnummer, projektname,
@@ -1361,7 +1489,11 @@ export default async function handler(req, res) {
         // v11.3 NEU: Merges aus dem rohen Template-Buffer
         preMergesCount: preMerges?.length || 0,
         preMerges: preMerges || [],
-        version: 'v11.3-merges-fixed',
+        // v11.4 NEU: Termin-Blöcke + Laufzeit
+        terminBlocksCount: builderOptions.termin_blocks?.length || 0,
+        laufzeitVon: builderOptions.laufzeitVon,
+        laufzeitBis: builderOptions.laufzeitBis,
+        version: 'v11.4-soziodemo-termine',
       },
     });
   } catch (err) {
@@ -1373,7 +1505,7 @@ export default async function handler(req, res) {
       error: err?.message || 'Unknown error',
       errorType: err?.name || 'Error',
       stack: err?.stack ? String(err.stack).split('\n').slice(0, 8) : null,
-      version: 'v11.3-merges-fixed',
+      version: 'v11.4-soziodemo-termine',
     });
   }
 }
