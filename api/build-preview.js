@@ -204,7 +204,14 @@ function copyWorksheet(srcWs, dstWs) {
     if (srcRow.hidden) dstRow.hidden = srcRow.hidden;
     srcRow.eachCell({ includeEmpty: true }, (srcCell, cn) => {
       const dstCell = dstWs.getCell(rn, cn);
-      dstCell.value = srcCell.value;
+      // v11.3: Wenn Zelle Teil eines Merges ist, aber NICHT der Master,
+      // dann nur Style kopieren, NICHT den Wert (sonst wird der Wert
+      // in alle Zellen des Merges geschrieben und sieht nach Re-Merge doppelt aus)
+      const isMergedSlave = srcCell.isMerged && srcCell.master &&
+                            srcCell.master.address !== srcCell.address;
+      if (!isMergedSlave) {
+        dstCell.value = srcCell.value;
+      }
       if (srcCell.font)      dstCell.font      = { ...srcCell.font };
       if (srcCell.fill)      dstCell.fill      = { ...srcCell.fill };
       if (srcCell.border)    dstCell.border    = { ...srcCell.border };
@@ -214,25 +221,25 @@ function copyWorksheet(srcWs, dstWs) {
     dstRow.commit();
   });
 
-  // Merges robust kopieren — funktioniert für alte (_merges Objekt) und
-  // neue ExcelJS-Versionen (model.merges Array)
-  const mergeRanges = [];
-  if (srcWs._merges && typeof srcWs._merges === 'object') {
-    // Alte ExcelJS-API: _merges ist Objekt mit Range-Strings als Keys
+  // v11.3: Merges robust kopieren — funktioniert für alle ExcelJS-Versionen
+  // (alte _merges Object, neue _merges Map, model.merges Array)
+  const mergeRanges = new Set();
+  // Variante 1: _merges als Object mit Range-Keys
+  if (srcWs._merges && typeof srcWs._merges === 'object' && !(srcWs._merges instanceof Map)) {
     for (const key of Object.keys(srcWs._merges)) {
-      mergeRanges.push(key);
+      mergeRanges.add(key);
     }
   }
-  if (srcWs.model?.merges && Array.isArray(srcWs.model.merges)) {
-    // Neue ExcelJS-API: model.merges ist Array
-    for (const m of srcWs.model.merges) {
-      if (!mergeRanges.includes(m)) mergeRanges.push(m);
-    }
-  }
-  if (typeof srcWs.mergeCells === 'function' && srcWs._merges instanceof Map) {
-    // Alternative: mergeCells als Map
+  // Variante 2: _merges als Map
+  if (srcWs._merges instanceof Map) {
     for (const key of srcWs._merges.keys()) {
-      if (!mergeRanges.includes(key)) mergeRanges.push(key);
+      mergeRanges.add(key);
+    }
+  }
+  // Variante 3: model.merges als Array (häufig bei neueren ExcelJS-Versionen)
+  if (Array.isArray(srcWs.model?.merges)) {
+    for (const m of srcWs.model.merges) {
+      if (typeof m === 'string') mergeRanges.add(m);
     }
   }
   for (const range of mergeRanges) {
@@ -1139,51 +1146,14 @@ export default async function handler(req, res) {
       });
     }
 
-    // v11.2: NEUER ANSATZ — Template direkt verwenden, statt zu kopieren.
-    // Das erhält automatisch alle Merges, Borders, Spaltenbreiten,
-    // Conditional-Formats und Data-Validations.
-    //
-    // Vorgehen:
-    //  - Wir laden das Template einmal als `result`
-    //  - Pro Gruppe duplizieren wir das Source-Sheet ins result
-    //  - Am Ende entfernen wir das ursprüngliche Source-Sheet (und alle
-    //    nicht genutzten Sheets), so dass nur die gefüllten Sheets bleiben
-
     const result = new ExcelJS.Workbook();
-    await result.xlsx.load(Buffer.from(templateBase64, 'base64'));
     result.creator = 'Preview Generator';
     result.created = new Date();
     const newSheetNames = [];
 
-    // Hilfsfunktion: Klont das Source-Sheet aus einem frischen Template-Buffer
-    // ins result-Workbook unter neuem Namen. Da ExcelJS keine sheet-Duplication
-    // hat, gehen wir per Buffer-Roundtrip. Dadurch gehen Merges automatisch mit.
-    async function cloneTemplateSheet(newName) {
-      // Strategie: lade das Original nochmal in ein Hilfs-Workbook und greife
-      // auf XML-Modell des Sheets zu, kopiere dann in result.
-      const wbHelp = new ExcelJS.Workbook();
-      await wbHelp.xlsx.load(Buffer.from(templateBase64, 'base64'));
-      const srcSheet = wbHelp.getWorksheet(cfg.sheetName);
-      const newSheet = result.addWorksheet(newName);
-      copyWorksheet(srcSheet, newSheet);
-      return newSheet;
-    }
-
-    // Sheet-Map: was wir am Ende behalten wollen
-    const keepSheets = new Set();
-
-    const processGruppe = async (gruppe, sheetName, fragenFG, includeIdiInfo) => {
-      let dstWs;
-      // Bei der ersten Gruppe: Source-Sheet umbenennen (vermeidet Klon-Aufwand)
-      if (newSheetNames.length === 0) {
-        dstWs = result.getWorksheet(cfg.sheetName);
-        if (dstWs.name !== sheetName) {
-          dstWs.name = sheetName;
-        }
-      } else {
-        dstWs = await cloneTemplateSheet(sheetName);
-      }
-      keepSheets.add(dstWs.name);
+    const processGruppe = (gruppe, sheetName, fragenFG, includeIdiInfo) => {
+      const dstWs = result.addWorksheet(sheetName);
+      copyWorksheet(srcWs, dstWs);
 
       const methodeFG = gruppe.methode || methode;
       const cfgFG = SHEET_CONFIG[methodeFG] || SHEET_CONFIG['GD'];
@@ -1208,7 +1178,7 @@ export default async function handler(req, res) {
 
     if (isIDI) {
       const hauptGruppe = { ...gruppen[0], methode };
-      await processGruppe(hauptGruppe, methode === 'VDI' ? 'VDIs' : 'IDIs', fragenArr, true);
+      processGruppe(hauptGruppe, methode === 'VDI' ? 'VDIs' : 'IDIs', fragenArr, true);
     } else {
       for (const gruppe of gruppen) {
         gruppe.methode = gruppe.methode || methode;
@@ -1218,26 +1188,8 @@ export default async function handler(req, res) {
           f.relevantFuerGruppen.includes('alle') ||
           f.relevantFuerGruppen.includes(gruppe.id)
         );
-        await processGruppe(gruppe, sheetName, fragenFG, false);
+        processGruppe(gruppe, sheetName, fragenFG, false);
       }
-    }
-
-    // v11.2: Bei nur 1 Gruppe wurde das Original-Sheet verwendet — alles ok.
-    // Bei mehreren Gruppen müssen wir das Original-Sheet entfernen, falls es
-    // den Namen "VDIs"/"VGDs"/"IDIs"/"GDs" hatte und nicht überschrieben wurde.
-    // (Ist beim aktuellen Flow nicht nötig, da wir es zuerst umbenannt haben.)
-
-    // v11.2: Entferne alle nicht-benutzten Sheets (z.B. das ursprüngliche
-    // VDIs-Sheet, falls wir GD im Template nutzen, oder umgekehrt).
-    const sheetsToRemove = [];
-    result.eachSheet((ws) => {
-      if (!keepSheets.has(ws.name)) {
-        sheetsToRemove.push(ws.name);
-      }
-    });
-    for (const name of sheetsToRemove) {
-      const ws = result.getWorksheet(name);
-      if (ws) result.removeWorksheet(ws.id);
     }
 
     const buffer = await result.xlsx.writeBuffer();
@@ -1286,7 +1238,7 @@ export default async function handler(req, res) {
         segmentBeschreibungenCount: builderOptions.segment_beschreibungen
           ? Object.keys(builderOptions.segment_beschreibungen).length : 0,
         studienQuotenCount: builderOptions.studien_quoten?.length || 0,
-        version: 'v11.2-template-direct',
+        version: 'v11.3-merges-fixed',
       },
     });
   } catch (err) {
@@ -1298,7 +1250,7 @@ export default async function handler(req, res) {
       error: err?.message || 'Unknown error',
       errorType: err?.name || 'Error',
       stack: err?.stack ? String(err.stack).split('\n').slice(0, 8) : null,
-      version: 'v11.2-template-direct',
+      version: 'v11.3-merges-fixed',
     });
   }
 }
