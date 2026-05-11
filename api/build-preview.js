@@ -501,7 +501,7 @@ function styleAnswerCell(cell, ant, isOffTarget) {
     top: blackThin, bottom: blackThin,
     left: blackThin, right: blackThin,
   };
-  cell.alignment = { wrapText: true, vertical: 'top' };
+  cell.alignment = { wrapText: true, vertical: 'middle' };
 }
 
 // Bereinigt Quote-Texte von Code-Syntax (z.B. "(F8.item2.code IN [1,2]) OR ...")
@@ -751,9 +751,28 @@ function writeQuestionColumn(ws, col, label, note, antList, quoteText, tnEnd, gr
   }
 
   const h = ws.getCell(HEADER_ROW, col);
-  // Bei conditional Fragen: Wechsel-Symbol vor Frage-Titel (Patch 3)
-  h.value = isConditional ? `🔀 ${label}` : label;
-  h.font = { bold: true, name: 'Arial', size: 9, color: { argb: 'FF000000' } };
+  // v12.0: Bei Skala-Fragen mit Tool-Input-IDs (H1_5, C12_8, D3, E8_1 etc.) den
+  // vollen Fragetext direkt unter dem Label anzeigen — sonst kann der Recruiter
+  // bei einer reinen ID + 5er-Skala nicht zuordnen, WAS bewertet werden soll.
+  const isToolInputId = /^[HCDE]\d/i.test((frage && frage.id) || '');
+  const ftClean = (frage && frage.fragetext) ? frage.fragetext.trim() : '';
+  const krzClean = (frage && (frage.kurz_label || frage.kurzlabel) || '').trim();
+  const showFragetextInHeader = isToolInputId && ftClean.length > 20 &&
+    ftClean.toLowerCase() !== krzClean.toLowerCase();
+
+  const prefix = isConditional ? '🔀 ' : '';
+  if (showFragetextInHeader) {
+    h.value = {
+      richText: [
+        { text: prefix + label,           font: { bold: true,  name: 'Arial', size: 9, color: { argb: 'FF000000' } } },
+        { text: '\n',                     font: { name: 'Arial', size: 8 } },
+        { text: ftClean,                  font: { italic: true, name: 'Arial', size: 8, color: { argb: 'FF555555' } } },
+      ],
+    };
+  } else {
+    h.value = prefix + label;
+    h.font = { bold: true, name: 'Arial', size: 9, color: { argb: 'FF000000' } };
+  }
   h.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
   h.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: isConditional ? 'FFFFF2CC' : COLORS.HEADER_GREY } };
   h.border = headerBorder;
@@ -775,7 +794,7 @@ function writeQuestionColumn(ws, col, label, note, antList, quoteText, tnEnd, gr
     } else {
       c.border = baseBorder;
     }
-    c.alignment = { wrapText: true, vertical: 'top' };
+    c.alignment = { wrapText: true, vertical: 'middle' };
   }
 
   // Antwort-Codes
@@ -807,7 +826,7 @@ function writeQuestionColumn(ws, col, label, note, antList, quoteText, tnEnd, gr
     qc.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: COLORS.GRUEN } };
     qc.font = { name: 'Arial', size: 9, bold: true, color: { argb: COLORS.QUOTE_FONT } };
     qc.border = cellBorder;
-    qc.alignment = { wrapText: true, vertical: 'top' };
+    qc.alignment = { wrapText: true, vertical: 'middle' };
     // Zeilenhöhe der Quote-Zeile dynamisch erhöhen, wenn mehrzeilig
     const lineCount = finalQuoteText.split('\n').length;
     if (lineCount > 1) {
@@ -852,13 +871,13 @@ function writeIdiInfoBlock(ws, opts) {
       const headerCell = ws.getCell(row, col);
       headerCell.value = `Segment ${segIdx} — ${name}`;
       headerCell.font = { name: 'Arial', size: 10, bold: true, color: { argb: 'FF1F4E79' } };
-      headerCell.alignment = { wrapText: true, vertical: 'top' };
+      headerCell.alignment = { wrapText: true, vertical: 'middle' };
       row++;
       // Beschreibung (kann mehrzeilig sein)
       const descCell = ws.getCell(row, col);
       descCell.value = String(desc);
       descCell.font = { name: 'Arial', size: 9 };
-      descCell.alignment = { wrapText: true, vertical: 'top' };
+      descCell.alignment = { wrapText: true, vertical: 'middle' };
       const lineCount = String(desc).split('\n').length;
       ws.getRow(row).height = Math.min(15 + lineCount * 14, 200);
       row++;
@@ -886,7 +905,7 @@ function writeIdiInfoBlock(ws, opts) {
       const c = ws.getCell(row, col);
       c.value = profileText;
       c.font = { name: 'Arial', size: 9 };
-      c.alignment = { wrapText: true, vertical: 'top' };
+      c.alignment = { wrapText: true, vertical: 'middle' };
       const lc = profileText.split('\n').length;
       ws.getRow(row).height = Math.min(15 + lc * 14, 150);
       row++;
@@ -904,7 +923,7 @@ function writeIdiInfoBlock(ws, opts) {
       const c = ws.getCell(row, col);
       c.value = `• ${q}`;
       c.font = { name: 'Arial', size: 9 };
-      c.alignment = { wrapText: true, vertical: 'top' };
+      c.alignment = { wrapText: true, vertical: 'middle' };
       row++;
     }
   }
@@ -1205,7 +1224,7 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
       const a = c.alignment || {};
       c.alignment = {
         ...a,
-        vertical: 'top',
+        vertical: 'middle',
       };
     }
   }
@@ -1213,7 +1232,7 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
   for (let r = TN_START; r <= tnEnd; r++) {
     const c = ws.getCell(r, lfdCol);
     c.value = r - TN_START + 1;
-    c.alignment = { horizontal: 'center', vertical: 'top' };
+    c.alignment = { horizontal: 'center', vertical: 'middle' };
     c.font = { name: 'Arial', size: 10, bold: true };
     if (r === tnEnd) {
       // Defensive: explizites Border-Objekt statt Spread auf ExcelJS-Property
@@ -1254,13 +1273,13 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
           if (cols.datum && block.datum) {
             const c = ws.getCell(row, cols.datum);
             c.value = String(block.datum);
-            c.alignment = { horizontal: 'center', vertical: 'top' };
+            c.alignment = { horizontal: 'center', vertical: 'middle' };
             c.font = { name: 'Arial', size: 10 };
           }
           if (cols.uhrzeit && block.uhrzeit) {
             const c = ws.getCell(row, cols.uhrzeit);
             c.value = String(block.uhrzeit);
-            c.alignment = { horizontal: 'center', vertical: 'top' };
+            c.alignment = { horizontal: 'center', vertical: 'middle' };
             c.font = { name: 'Arial', size: 10 };
           }
         }
@@ -1450,8 +1469,27 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
         const ftLower = (frage.fragetext || '').toLowerCase();
         if (ftLower.includes('geschlecht') && gruppe.geschlecht && gruppe.geschlecht !== 'gemischt') {
           quoteText = `Quote: nur ${gruppe.geschlecht}`;
-        } else if ((ftLower.includes('alt sind') || ftLower.includes('alter')) && gruppe.alter_min && gruppe.alter_max) {
-          quoteText = `Quote: ${gruppe.alter_min}-${gruppe.alter_max} Jahre`;
+        } else if (ftLower.includes('alt sind') || ftLower.includes('alter')) {
+          // v12.0: Bei IDI-Studien mit pro-Segment-Altersbereichen die Alter
+          // pro Segment auflisten statt einer einzelnen Gruppen-Range
+          const idiProfile = Array.isArray(opts.idiProfile) ? opts.idiProfile : [];
+          const hasSegAge = idiProfile.some(p => p.alter_min != null || p.alter_max != null);
+          if (hasSegAge) {
+            const segAge = {};
+            for (const p of idiProfile) {
+              if (p.alter_min != null || p.alter_max != null) {
+                const segKey = p.segment || p.id || '?';
+                if (!segAge[segKey]) segAge[segKey] = [p.alter_min, p.alter_max];
+              }
+            }
+            const lines = Object.entries(segAge).map(([seg, [mn, mx]]) => {
+              const range = (mx != null) ? `${mn}-${mx}` : (mn != null ? `${mn}+` : '?');
+              return `${seg}: ${range}`;
+            });
+            if (lines.length > 0) quoteText = 'Quote pro Segment:\n' + lines.join('\n');
+          } else if (gruppe.alter_min && gruppe.alter_max) {
+            quoteText = `Quote: ${gruppe.alter_min}-${gruppe.alter_max} Jahre`;
+          }
         }
       }
       writeQuestionColumn(ws, currentCol, label, note,
@@ -1649,7 +1687,7 @@ export default async function handler(req, res) {
         terminBlocksCount: builderOptions.termin_blocks?.length || 0,
         laufzeitVon: builderOptions.laufzeitVon,
         laufzeitBis: builderOptions.laufzeitBis,
-        version: 'v11.6-tn-merges-dvs',
+        version: 'v12.1-vertical-middle',
       },
     });
   } catch (err) {
@@ -1661,7 +1699,7 @@ export default async function handler(req, res) {
       error: err?.message || 'Unknown error',
       errorType: err?.name || 'Error',
       stack: err?.stack ? String(err.stack).split('\n').slice(0, 8) : null,
-      version: 'v11.6-tn-merges-dvs',
+      version: 'v12.1-vertical-middle',
     });
   }
 }
