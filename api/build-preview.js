@@ -1465,31 +1465,55 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
       const note = frage.bedingung ? `Bedingung: ${frage.bedingung}` : '';
       let quoteText = frage.quotenkommentar || frage.bedingung || '';
       // Auto-Quote-Hinweis für F1 (Geschlecht) und F2 (Alter) aus Gruppen-Daten
-      if (!quoteText) {
-        const ftLower = (frage.fragetext || '').toLowerCase();
-        if (ftLower.includes('geschlecht') && gruppe.geschlecht && gruppe.geschlecht !== 'gemischt') {
-          quoteText = `Quote: nur ${gruppe.geschlecht}`;
-        } else if (ftLower.includes('alt sind') || ftLower.includes('alter')) {
-          // v12.0: Bei IDI-Studien mit pro-Segment-Altersbereichen die Alter
-          // pro Segment auflisten statt einer einzelnen Gruppen-Range
-          const idiProfile = Array.isArray(opts.idiProfile) ? opts.idiProfile : [];
-          const hasSegAge = idiProfile.some(p => p.alter_min != null || p.alter_max != null);
-          if (hasSegAge) {
-            const segAge = {};
-            for (const p of idiProfile) {
-              if (p.alter_min != null || p.alter_max != null) {
-                const segKey = p.segment || p.id || '?';
-                if (!segAge[segKey]) segAge[segKey] = [p.alter_min, p.alter_max];
-              }
-            }
-            const lines = Object.entries(segAge).map(([seg, [mn, mx]]) => {
-              const range = (mx != null) ? `${mn}-${mx}` : (mn != null ? `${mn}+` : '?');
-              return `${seg}: ${range}`;
-            });
-            if (lines.length > 0) quoteText = 'Quote pro Segment:\n' + lines.join('\n');
-          } else if (gruppe.alter_min && gruppe.alter_max) {
-            quoteText = `Quote: ${gruppe.alter_min}-${gruppe.alter_max} Jahre`;
+      const ftLower = (frage.fragetext || '').toLowerCase();
+      if (!quoteText && ftLower.includes('geschlecht') && gruppe.geschlecht && gruppe.geschlecht !== 'gemischt') {
+        quoteText = `Quote: nur ${gruppe.geschlecht}`;
+      }
+      // v12.2: Alter-Spalte — IMMER Segment-Liste versuchen (auch ergänzend zu
+      // einem ggf. vorhandenen quotenkommentar). Zwei Quellen mit Fallback:
+      //   1) idiProfile[i].alter_min/alter_max (strukturierte Felder vom Parser)
+      //   2) segment_beschreibungen[name] via Regex (Freitext-Fallback —
+      //      greift wenn Sonnet die strukturierten Felder vergisst)
+      if (ftLower.includes('alt sind') || ftLower.includes('alter')) {
+        const idiProfile = Array.isArray(opts.idiProfile) ? opts.idiProfile : [];
+        const segBeschr = (opts.segment_beschreibungen && typeof opts.segment_beschreibungen === 'object')
+          ? opts.segment_beschreibungen : null;
+        const segAge = {};
+        // Quelle 1: idiProfile mit alter_min/alter_max
+        for (const p of idiProfile) {
+          if (p.alter_min != null || p.alter_max != null) {
+            const segKey = p.segment || p.id || '?';
+            if (!segAge[segKey]) segAge[segKey] = [p.alter_min, p.alter_max];
           }
+        }
+        // Quelle 2: Regex auf segment_beschreibungen (Fallback)
+        if (Object.keys(segAge).length === 0 && segBeschr) {
+          const segNames = idiProfile.length > 0
+            ? [...new Set(idiProfile.map(p => p.segment).filter(Boolean))]
+            : Object.keys(segBeschr);
+          for (const seg of segNames) {
+            const desc = segBeschr[seg];
+            if (!desc) continue;
+            const ds = String(desc);
+            // Range: "18-50", "18–50", "18 bis 50"
+            let m = ds.match(/(\d{2})\s*[-–]\s*(\d{2})/);
+            if (!m) m = ds.match(/(\d{2})\s*bis\s*(\d{2})/i);
+            if (m) { segAge[seg] = [parseInt(m[1]), parseInt(m[2])]; continue; }
+            // Open-ended: "55+", "ab 55", "über 50"
+            m = ds.match(/(\d{2})\s*\+/);
+            if (!m) m = ds.match(/(?:ab|[üu]ber)\s*(\d{2})/i);
+            if (m) segAge[seg] = [parseInt(m[1]), null];
+          }
+        }
+        const lines = Object.entries(segAge).map(([seg, [mn, mx]]) => {
+          const range = (mx != null) ? `${mn}-${mx}` : (mn != null ? `${mn}+` : '?');
+          return `${seg}: ${range}`;
+        });
+        if (lines.length > 0) {
+          const segText = 'Quote pro Segment:\n' + lines.join('\n');
+          quoteText = quoteText ? `${quoteText}\n\n${segText}` : segText;
+        } else if (!quoteText && gruppe.alter_min && gruppe.alter_max) {
+          quoteText = `Quote: ${gruppe.alter_min}-${gruppe.alter_max} Jahre`;
         }
       }
       writeQuestionColumn(ws, currentCol, label, note,
@@ -1687,7 +1711,7 @@ export default async function handler(req, res) {
         terminBlocksCount: builderOptions.termin_blocks?.length || 0,
         laufzeitVon: builderOptions.laufzeitVon,
         laufzeitBis: builderOptions.laufzeitBis,
-        version: 'v12.1-vertical-middle',
+        version: 'v12.2-alter-segment-fallback',
       },
     });
   } catch (err) {
@@ -1699,7 +1723,7 @@ export default async function handler(req, res) {
       error: err?.message || 'Unknown error',
       errorType: err?.name || 'Error',
       stack: err?.stack ? String(err.stack).split('\n').slice(0, 8) : null,
-      version: 'v12.1-vertical-middle',
+      version: 'v12.2-alter-segment-fallback',
     });
   }
 }
