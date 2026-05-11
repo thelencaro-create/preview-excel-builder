@@ -1020,6 +1020,88 @@ function buildHeaderLabel(frage) {
   return (lang || id).substring(0, 40);
 }
 
+// v12.3: Formatiert Segment-Quotenkommentare aus dem Parser als mehrzeilige
+// Liste mit aufgelösten Segment-Namen aus idiProfile.
+//
+// Input:  "Quote: Segment 1: 4 oder 5; Segment 2: 0,1,2 oder 3; Segment 5: 3 oder 4"
+// Output: "Quote pro Segment:
+//          Segment 1 (Ambitious Maximisers): 4 oder 5
+//          Segment 2 (Experienced Optimisers): 0,1,2 oder 3
+//          Segment 5 (Aspiring Apprentice): 3 oder 4"
+//
+// Bei Texten ohne "Segment N:" Pattern wird der Input unverändert zurückgegeben.
+function formatSegmentQuotes(text, idiProfile) {
+  if (!text || typeof text !== 'string') return text;
+  const segMentions = text.match(/Segment\s*\d+\s*:/gi);
+  if (!segMentions || segMentions.length < 2) return text;
+
+  // "Quote:" prefix entfernen
+  let body = text.replace(/^\s*Quote\s*:\s*/i, '');
+
+  // Tail abtrennen (z.B. "Hinweis für Rekrutierer: ...")
+  let tail = '';
+  const tailRe = /\s*[;|]\s*((?:Hinweis|Note|Anmerkung|HINWEIS)[^]*)$/i;
+  const tm = body.match(tailRe);
+  if (tm) {
+    body = body.substring(0, tm.index);
+    tail = tm[1].trim();
+  }
+
+  // Split bei "; Segment N:" oder "| Segment N:"
+  const parts = body
+    .split(/\s*[;|]\s*(?=Segment\s*\d+\s*:)/i)
+    .map(p => p.trim())
+    .filter(Boolean);
+  if (parts.length < 2) return text;
+
+  // Segment-Nr → Name Mapping aus idiProfile
+  // Quelle 1: explizite segment_nr-Felder (vom Parser via PATCH 10 erweitert)
+  // Quelle 2: Auftreten-Reihenfolge der unique Segments in idiProfile
+  const segNumToName = {};
+  if (Array.isArray(idiProfile) && idiProfile.length > 0) {
+    // 1) explizite segment_nr
+    for (const p of idiProfile) {
+      if (p.segment && p.segment_nr != null) {
+        const n = parseInt(p.segment_nr);
+        if (!isNaN(n) && !segNumToName[n]) segNumToName[n] = p.segment;
+      }
+    }
+    // 2) Fallback: Auftreten-Reihenfolge mit Nrs aus dem Text matchen
+    if (Object.keys(segNumToName).length === 0) {
+      const uniqueSegs = [];
+      for (const p of idiProfile) {
+        if (p.segment && !uniqueSegs.includes(p.segment)) uniqueSegs.push(p.segment);
+      }
+      const numsInText = [];
+      for (const part of parts) {
+        const m = part.match(/Segment\s*(\d+)/i);
+        if (m) {
+          const num = parseInt(m[1]);
+          if (!numsInText.includes(num)) numsInText.push(num);
+        }
+      }
+      if (numsInText.length === uniqueSegs.length) {
+        numsInText.forEach((num, idx) => { segNumToName[num] = uniqueSegs[idx]; });
+      } else {
+        uniqueSegs.forEach((name, idx) => { segNumToName[idx + 1] = name; });
+      }
+    }
+  }
+
+  const lines = parts.map(part => {
+    const m = part.match(/^Segment\s*(\d+)\s*:\s*(.+)$/i);
+    if (!m) return part;
+    const num = parseInt(m[1]);
+    const value = m[2].trim();
+    const name = segNumToName[num];
+    return name ? `Segment ${num} (${name}): ${value}` : `Segment ${num}: ${value}`;
+  });
+
+  let result = 'Quote pro Segment:\n' + lines.join('\n');
+  if (tail) result += '\n\n' + tail;
+  return result;
+}
+
 function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, setting, methode, quoteStartCol, allGruppen, options) {
   const opts = options || {};
   const compactMatrix = opts.compactMatrix === true;
@@ -1398,6 +1480,7 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
           screenout: a.screenout === true ? true :
                      (item.screenout_codes || []).map(String).includes(String(a.code)),
         }));
+        itemQuote = formatSegmentQuotes(itemQuote, opts.idiProfile);
         writeQuestionColumn(ws, currentCol, item.item_label || '', itemNote,
                             ants, itemQuote, tnEnd, gruppe, frage, isLast, allGruppen, uniformQuoteRow);
         currentCol++;
@@ -1414,8 +1497,9 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
         const summaryAnts = sharedAnswers;
         // Quote-Text: Hinweis auf Sammelspalte
         const summaryQuote = `Sammelspalte: ${otherItems.length} weitere Items (siehe Tooltip)\nKein Screenout, kein Quoten-Marker.`;
+        const summaryQuoteFmt = formatSegmentQuotes(summaryQuote, opts.idiProfile);
         writeQuestionColumn(ws, currentCol, summaryLabel, summaryNote,
-                            summaryAnts, summaryQuote, tnEnd, gruppe, frage, true, allGruppen, uniformQuoteRow);
+                            summaryAnts, summaryQuoteFmt, tnEnd, gruppe, frage, true, allGruppen, uniformQuoteRow);
         // Sammelspalte etwas breiter machen
         ws.getColumn(currentCol).width = 28;
         currentCol++;
@@ -1455,8 +1539,9 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
                    (frage.quotenkommentar || '');
       const quoteText = frage.quotenkommentar
         || 'Eingabe in Segmentierungs-Tool — Ergebnis: Segment';
+      const tiQuoteFmt = formatSegmentQuotes(quoteText, opts.idiProfile);
       writeQuestionColumn(ws, currentCol, label + ' (Tool)', note,
-                          [], quoteText, tnEnd, gruppe, frage, true, allGruppen, uniformQuoteRow);
+                          [], tiQuoteFmt, tnEnd, gruppe, frage, true, allGruppen, uniformQuoteRow);
       ws.getColumn(currentCol).width = 30;
       currentCol++;
     } else {
@@ -1505,10 +1590,29 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
             if (m) segAge[seg] = [parseInt(m[1]), null];
           }
         }
-        const lines = Object.entries(segAge).map(([seg, [mn, mx]]) => {
-          const range = (mx != null) ? `${mn}-${mx}` : (mn != null ? `${mn}+` : '?');
-          return `${seg}: ${range}`;
-        });
+        // Segment-Nr aus idiProfile bestimmen (explizit segment_nr oder Auftreten-Reihenfolge)
+        const segNrMap = {};
+        for (const p of idiProfile) {
+          if (p.segment && p.segment_nr != null && !segNrMap[p.segment]) {
+            segNrMap[p.segment] = parseInt(p.segment_nr);
+          }
+        }
+        if (Object.keys(segNrMap).length === 0) {
+          const uniqSegs = [];
+          for (const p of idiProfile) {
+            if (p.segment && !uniqSegs.includes(p.segment)) uniqSegs.push(p.segment);
+          }
+          uniqSegs.forEach((s, idx) => { segNrMap[s] = idx + 1; });
+        }
+        const lines = Object.entries(segAge)
+          .map(([seg, [mn, mx]]) => {
+            const range = (mx != null) ? `${mn}-${mx}` : (mn != null ? `${mn}+` : '?');
+            const nr = segNrMap[seg];
+            const label = nr != null ? `Segment ${nr} (${seg})` : seg;
+            return { nr: nr || 999, text: `${label}: ${range}` };
+          })
+          .sort((a, b) => a.nr - b.nr)
+          .map(x => x.text);
         if (lines.length > 0) {
           const segText = 'Quote pro Segment:\n' + lines.join('\n');
           quoteText = quoteText ? `${quoteText}\n\n${segText}` : segText;
@@ -1516,6 +1620,7 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
           quoteText = `Quote: ${gruppe.alter_min}-${gruppe.alter_max} Jahre`;
         }
       }
+      quoteText = formatSegmentQuotes(quoteText, opts.idiProfile);
       writeQuestionColumn(ws, currentCol, label, note,
                           frage.antworten, quoteText, tnEnd, gruppe, frage, true, allGruppen, uniformQuoteRow);
       currentCol++;
@@ -1711,7 +1816,7 @@ export default async function handler(req, res) {
         terminBlocksCount: builderOptions.termin_blocks?.length || 0,
         laufzeitVon: builderOptions.laufzeitVon,
         laufzeitBis: builderOptions.laufzeitBis,
-        version: 'v12.2-alter-segment-fallback',
+        version: 'v12.3-segment-named-quotes',
       },
     });
   } catch (err) {
@@ -1723,7 +1828,7 @@ export default async function handler(req, res) {
       error: err?.message || 'Unknown error',
       errorType: err?.name || 'Error',
       stack: err?.stack ? String(err.stack).split('\n').slice(0, 8) : null,
-      version: 'v12.2-alter-segment-fallback',
+      version: 'v12.3-segment-named-quotes',
     });
   }
 }
