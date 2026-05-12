@@ -2447,7 +2447,7 @@ export default async function handler(req, res) {
         terminBlocksCount: builderOptions.termin_blocks?.length || 0,
         laufzeitVon: builderOptions.laufzeitVon,
         laufzeitBis: builderOptions.laufzeitBis,
-        version: 'v12.5-multi-firma-termin-dateiname',
+        version: 'v12.10-kollabierbare-bloecke',
       },
     });
   } catch (err) {
@@ -2459,7 +2459,7 @@ export default async function handler(req, res) {
       error: err?.message || 'Unknown error',
       errorType: err?.name || 'Error',
       stack: err?.stack ? String(err.stack).split('\n').slice(0, 8) : null,
-      version: 'v12.5-multi-firma-termin-dateiname',
+      version: 'v12.10-kollabierbare-bloecke',
     });
   }
 }
