@@ -1516,6 +1516,14 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
         frage.kategorie === 'verfuegbarkeit') {
       continue;
     }
+    // v12.6: Auto-Fix - wenn typ='numerisch' oder 'freitext' aber antworten[] mit
+    // Codes UND Texten gefuellt ist, ist es eigentlich single_choice (typischer
+    // Parser-Fehler bei Fragen wie 'Alter: ___' mit Optionen 1-3 darunter).
+    if ((frage.typ === 'numerisch' || frage.typ === 'freitext') &&
+        Array.isArray(frage.antworten) && frage.antworten.length > 0 &&
+        frage.antworten[0].code && frage.antworten[0].text) {
+      frage.typ = 'single_choice';
+    }
     // Wenn typ='single_choice' aber items[] vorhanden ist (Parser-Inkonsistenz),
     // behandle als Matrix.
     const istEffektivMatrix = frage.typ === 'matrix' || 
