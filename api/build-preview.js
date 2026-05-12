@@ -1142,6 +1142,487 @@ function resolveUnternehmenFromStandort(standort, fallback) {
   return fallback || 'F&T';
 }
 
+// v12.7: Sheet-Sortierung nach Datum + Uhrzeit (chronologisch)
+// Frontend liefert datum als "Mo. 19.05.", "Di. 20.05." (Wochentag + DD.MM.).
+// Uhrzeit als "14:30 - 16:30". Wir extrahieren Tag, Monat, Stunde, Minute zum
+// Sortieren. Wenn Datum/Uhrzeit fehlt, bleibt die Gruppe am Ende.
+function getSortKey(gruppe) {
+  const datum = String(gruppe.datum || '').trim();
+  const uhrzeit = String(gruppe.uhrzeit || '').trim();
+  // Datum parsen: irgendwo "DD.MM." oder "DD.MM.YYYY"
+  const dm = datum.match(/(\d{1,2})\.(\d{1,2})\.(\d{4})?/);
+  if (!dm) return Number.MAX_SAFE_INTEGER;
+  const day = parseInt(dm[1]);
+  const month = parseInt(dm[2]);
+  const year = dm[3] ? parseInt(dm[3]) : 2026; // Fallback aktuelles Jahr
+  // Uhrzeit parsen: erste HH:MM Gruppe
+  const um = uhrzeit.match(/(\d{1,2}):(\d{2})/);
+  const hour = um ? parseInt(um[1]) : 0;
+  const minute = um ? parseInt(um[2]) : 0;
+  // Numerischer Sort-Key: YYYYMMDDHHMM
+  return year * 100000000 + month * 1000000 + day * 10000 + hour * 100 + minute;
+}
+
+// v12.9: Quotenübersicht-Sheet als erstes Sheet der Excel
+//
+// Struktur:
+//   1. STUDIEN-WEITE QUOTEN (1x, gelten für alle Gruppen)
+//   2. GLOBALE AUSSCHLUSSKRITERIEN (1x, gelten für alle Gruppen)
+//   3. ALLGEMEINE HINWEISE (1x, Quotenkommentare auf Frage-Ebene)
+//   4. PRO GRUPPE: nur Gruppen-spezifische Anforderungen
+//   5. IDI-SEGMENTE falls vorhanden
+//
+// Ziel: Recruiter ohne tiefes Quotenverständnis kann die Zielgruppe einer
+// Gruppe sofort erfassen. Globale Daten nur einmal, Gruppen-Block nur das
+// Spezifische.
+function buildOverviewSheet(workbook, gruppen, fragen, studienQuoten, idiProfile, methode) {
+  const ws = workbook.addWorksheet('Quotenübersicht', {
+    properties: { tabColor: { argb: 'FFFFC000' } }
+  });
+
+  ws.getColumn(1).width = 4;
+  ws.getColumn(2).width = 24;
+  ws.getColumn(3).width = 60;
+  ws.getColumn(4).width = 35;
+  ws.getColumn(5).width = 4;
+
+  let row = 2;
+
+  // =========================================================================
+  // HAUPT-TITEL
+  // =========================================================================
+  ws.mergeCells(`B${row}:D${row}`);
+  const titleCell = ws.getCell(`B${row}`);
+  titleCell.value = 'QUOTENÜBERSICHT';
+  titleCell.font = { name: 'Calibri', size: 18, bold: true, color: { argb: 'FF1F4E78' } };
+  titleCell.alignment = { horizontal: 'left', vertical: 'middle' };
+  ws.getRow(row).height = 30;
+  row += 2;
+
+  // =========================================================================
+  // SEKTION 1: STUDIEN-WEITE QUOTEN
+  // =========================================================================
+  if (Array.isArray(studienQuoten) && studienQuoten.length > 0) {
+    ws.mergeCells(`B${row}:D${row}`);
+    const c = ws.getCell(`B${row}`);
+    c.value = '📌 STUDIEN-WEITE QUOTEN (gelten für ALLE Gruppen)';
+    c.font = { name: 'Calibri', size: 12, bold: true, color: { argb: 'FFFFFFFF' } };
+    c.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1F4E78' } };
+    c.alignment = { horizontal: 'left', vertical: 'middle', indent: 1 };
+    ws.getRow(row).height = 22;
+    row++;
+
+    for (const q of studienQuoten) {
+      ws.mergeCells(`B${row}:D${row}`);
+      const cc = ws.getCell(`B${row}`);
+      cc.value = '• ' + q;
+      cc.font = { name: 'Calibri', size: 11 };
+      cc.alignment = { horizontal: 'left', vertical: 'middle', wrapText: true, indent: 1 };
+      cc.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF2F2F2' } };
+      ws.getRow(row).height = Math.max(20, Math.ceil(q.length / 90) * 18);
+      row++;
+    }
+    row += 2;
+  }
+
+  // =========================================================================
+  // SEKTION 2: GLOBALE AUSSCHLUSSKRITERIEN
+  // =========================================================================
+  const globalScreenouts = collectGlobalScreenouts(fragen);
+  if (globalScreenouts.length > 0) {
+    ws.mergeCells(`B${row}:D${row}`);
+    const c = ws.getCell(`B${row}`);
+    c.value = '❌ AUSSCHLUSSKRITERIEN (gelten für ALLE Gruppen)';
+    c.font = { name: 'Calibri', size: 12, bold: true, color: { argb: 'FFFFFFFF' } };
+    c.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFC00000' } };
+    c.alignment = { horizontal: 'left', vertical: 'middle', indent: 1 };
+    ws.getRow(row).height = 22;
+    row++;
+
+    // Spalten-Header
+    ws.getCell(`B${row}`).value = 'Frage';
+    ws.getCell(`C${row}`).value = 'Antwort/Item';
+    ws.getCell(`D${row}`).value = 'Konsequenz';
+    for (const col of ['B','C','D']) {
+      const h = ws.getCell(`${col}${row}`);
+      h.font = { name: 'Calibri', size: 10, bold: true, color: { argb: 'FF595959' } };
+      h.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF2F2F2' } };
+      h.alignment = { horizontal: 'left', vertical: 'middle', indent: 1 };
+    }
+    ws.getRow(row).height = 20;
+    row++;
+
+    for (const eintrag of globalScreenouts) {
+      ws.getCell(`B${row}`).value = eintrag.frageLabel;
+      ws.getCell(`B${row}`).font = { name: 'Calibri', size: 10, bold: true };
+      ws.getCell(`B${row}`).alignment = { horizontal: 'left', vertical: 'top', wrapText: true, indent: 1 };
+
+      ws.getCell(`C${row}`).value = eintrag.codeText;
+      ws.getCell(`C${row}`).font = { name: 'Calibri', size: 10 };
+      ws.getCell(`C${row}`).alignment = { horizontal: 'left', vertical: 'top', wrapText: true, indent: 1 };
+
+      ws.getCell(`D${row}`).value = '→ Screenout';
+      ws.getCell(`D${row}`).font = { name: 'Calibri', size: 10, bold: true, color: { argb: 'FFC00000' } };
+      ws.getCell(`D${row}`).alignment = { horizontal: 'left', vertical: 'top', indent: 1 };
+
+      const maxLen = (eintrag.codeText || '').length;
+      ws.getRow(row).height = Math.max(18, Math.min(60, Math.ceil(maxLen / 50) * 18));
+      row++;
+    }
+    row += 2;
+  }
+
+  // =========================================================================
+  // SEKTION 3: ALLGEMEINE HINWEISE (Quotenkommentare auf Frage-Ebene)
+  // =========================================================================
+  const globalHinweise = collectGlobalHinweise(fragen);
+  if (globalHinweise.length > 0) {
+    ws.mergeCells(`B${row}:D${row}`);
+    const c = ws.getCell(`B${row}`);
+    c.value = '💡 HINWEISE FÜR DEN REKRUTIERER (gelten für ALLE Gruppen)';
+    c.font = { name: 'Calibri', size: 12, bold: true, color: { argb: 'FFFFFFFF' } };
+    c.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFBF8F00' } };
+    c.alignment = { horizontal: 'left', vertical: 'middle', indent: 1 };
+    ws.getRow(row).height = 22;
+    row++;
+
+    for (const h of globalHinweise) {
+      ws.getCell(`B${row}`).value = h.frageLabel;
+      ws.getCell(`B${row}`).font = { name: 'Calibri', size: 10, bold: true };
+      ws.getCell(`B${row}`).alignment = { horizontal: 'left', vertical: 'top', wrapText: true, indent: 1 };
+
+      ws.mergeCells(`C${row}:D${row}`);
+      const t = ws.getCell(`C${row}`);
+      t.value = h.text;
+      t.font = { name: 'Calibri', size: 10, italic: true };
+      t.alignment = { horizontal: 'left', vertical: 'top', wrapText: true, indent: 1 };
+      t.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFF9E6' } };
+
+      ws.getRow(row).height = Math.max(20, Math.min(80, Math.ceil(h.text.length / 70) * 18));
+      row++;
+    }
+    row += 2;
+  }
+
+  // =========================================================================
+  // SEKTION 4: PRO GRUPPE EIN BLOCK (nur Gruppen-spezifische Anforderungen)
+  // =========================================================================
+  const COLORS = [
+    { header: 'FF2E75B6', body: 'FFDEEBF7' }, // Blau
+    { header: 'FF548235', body: 'FFE2EFDA' }, // Grün
+    { header: 'FFBF8F00', body: 'FFFFF2CC' }, // Gelb-Gold
+    { header: 'FFC65911', body: 'FFFCE4D6' }, // Orange
+    { header: 'FF7030A0', body: 'FFE4D6F0' }, // Violett
+    { header: 'FFA52A2A', body: 'FFF5DEDE' }, // Braun-Rot
+  ];
+
+  for (let i = 0; i < gruppen.length; i++) {
+    const gruppe = gruppen[i];
+    const farbe = COLORS[i % COLORS.length];
+
+    // Header
+    ws.mergeCells(`B${row}:D${row}`);
+    const h = ws.getCell(`B${row}`);
+    const groupLabel = gruppe.id + (gruppe.zielgruppe ? ' — ' + gruppe.zielgruppe : '');
+    h.value = groupLabel;
+    h.font = { name: 'Calibri', size: 14, bold: true, color: { argb: 'FFFFFFFF' } };
+    h.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: farbe.header } };
+    h.alignment = { horizontal: 'left', vertical: 'middle', indent: 1 };
+    ws.getRow(row).height = 26;
+    row++;
+
+    // Metadaten
+    const metaParts = [];
+    if (gruppe.standort) metaParts.push('📍 ' + gruppe.standort);
+    if (gruppe.datum || gruppe.uhrzeit) {
+      metaParts.push('🕐 ' + ((gruppe.datum || '') + ' ' + (gruppe.uhrzeit || '')).trim());
+    }
+    const brutto = gruppe.brutto || gruppe.tnBrutto || 8;
+    const netto = gruppe.netto || 6;
+    metaParts.push('👥 ' + brutto + ' Brutto / ' + netto + ' Netto');
+    if (gruppe.incentive) metaParts.push('💰 ' + gruppe.incentive);
+
+    ws.mergeCells(`B${row}:D${row}`);
+    const mc = ws.getCell(`B${row}`);
+    mc.value = metaParts.join('   ·   ');
+    mc.font = { name: 'Calibri', size: 10, italic: true, color: { argb: 'FF595959' } };
+    mc.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: farbe.body } };
+    mc.alignment = { horizontal: 'left', vertical: 'middle', indent: 1 };
+    ws.getRow(row).height = 20;
+    row++;
+
+    // Zuordnungs-Kriterien (Klartext)
+    if (gruppe.zuordnungs_kriterien) {
+      ws.mergeCells(`B${row}:D${row}`);
+      const zc = ws.getCell(`B${row}`);
+      zc.value = '📋 Zuordnung: ' + gruppe.zuordnungs_kriterien;
+      zc.font = { name: 'Calibri', size: 10, color: { argb: 'FF1F4E78' } };
+      zc.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: farbe.body } };
+      zc.alignment = { horizontal: 'left', vertical: 'middle', wrapText: true, indent: 1 };
+      ws.getRow(row).height = Math.max(30, Math.ceil(gruppe.zuordnungs_kriterien.length / 90) * 18);
+      row++;
+    }
+    row++;
+
+    // Anforderungen
+    const anforderungen = collectAnforderungen(fragen, gruppe.id);
+    if (anforderungen.length > 0) {
+      ws.mergeCells(`B${row}:D${row}`);
+      const ah = ws.getCell(`B${row}`);
+      ah.value = '✅ ANFORDERUNGEN AN TEILNEHMER (spezifisch für ' + gruppe.id + ')';
+      ah.font = { name: 'Calibri', size: 11, bold: true, color: { argb: 'FF548235' } };
+      ah.alignment = { horizontal: 'left', vertical: 'middle', indent: 1 };
+      ws.getRow(row).height = 22;
+      row++;
+
+      // Header-Zeile
+      ws.getCell(`B${row}`).value = 'Frage';
+      ws.getCell(`C${row}`).value = 'Antwort/Item';
+      ws.getCell(`D${row}`).value = 'Quote/Anforderung';
+      for (const col of ['B','C','D']) {
+        const hc = ws.getCell(`${col}${row}`);
+        hc.font = { name: 'Calibri', size: 10, bold: true, color: { argb: 'FF595959' } };
+        hc.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF2F2F2' } };
+        hc.alignment = { horizontal: 'left', vertical: 'middle', indent: 1 };
+      }
+      ws.getRow(row).height = 20;
+      row++;
+
+      for (const eintrag of anforderungen) {
+        ws.getCell(`B${row}`).value = eintrag.frageLabel;
+        ws.getCell(`B${row}`).font = { name: 'Calibri', size: 10, bold: true };
+        ws.getCell(`B${row}`).alignment = { horizontal: 'left', vertical: 'top', wrapText: true, indent: 1 };
+
+        ws.getCell(`C${row}`).value = eintrag.codeText;
+        ws.getCell(`C${row}`).font = { name: 'Calibri', size: 10 };
+        ws.getCell(`C${row}`).alignment = { horizontal: 'left', vertical: 'top', wrapText: true, indent: 1 };
+
+        ws.getCell(`D${row}`).value = eintrag.soll;
+        ws.getCell(`D${row}`).font = { name: 'Calibri', size: 10, bold: true, color: { argb: 'FF548235' } };
+        ws.getCell(`D${row}`).alignment = { horizontal: 'left', vertical: 'top', wrapText: true, indent: 1 };
+
+        const maxLen = Math.max((eintrag.codeText || '').length, (eintrag.soll || '').length);
+        ws.getRow(row).height = Math.max(18, Math.min(60, Math.ceil(maxLen / 50) * 18));
+        row++;
+      }
+    } else {
+      ws.mergeCells(`B${row}:D${row}`);
+      const empty = ws.getCell(`B${row}`);
+      empty.value = '(keine Gruppen-spezifischen Anforderungen — siehe globale Quoten oben)';
+      empty.font = { name: 'Calibri', size: 10, italic: true, color: { argb: 'FF808080' } };
+      empty.alignment = { horizontal: 'left', vertical: 'middle', indent: 1 };
+      ws.getRow(row).height = 20;
+      row++;
+    }
+
+    row += 2;
+  }
+
+  // =========================================================================
+  // SEKTION 5: IDI-SEGMENTE
+  // =========================================================================
+  if (Array.isArray(idiProfile) && idiProfile.length > 0) {
+    ws.mergeCells(`B${row}:D${row}`);
+    const c = ws.getCell(`B${row}`);
+    c.value = '🎯 IDI-SEGMENT-ZUORDNUNG';
+    c.font = { name: 'Calibri', size: 14, bold: true, color: { argb: 'FFFFFFFF' } };
+    c.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1F4E78' } };
+    c.alignment = { horizontal: 'left', vertical: 'middle', indent: 1 };
+    ws.getRow(row).height = 26;
+    row++;
+
+    ws.getCell(`B${row}`).value = 'IDI';
+    ws.getCell(`C${row}`).value = 'Segment';
+    ws.getCell(`D${row}`).value = 'Profil-Anforderungen';
+    for (const col of ['B','C','D']) {
+      const hc = ws.getCell(`${col}${row}`);
+      hc.font = { name: 'Calibri', size: 10, bold: true };
+      hc.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF2F2F2' } };
+      hc.alignment = { horizontal: 'left', vertical: 'middle', indent: 1 };
+    }
+    row++;
+
+    for (const idi of idiProfile) {
+      ws.getCell(`B${row}`).value = idi.id || '';
+      ws.getCell(`B${row}`).font = { name: 'Calibri', size: 10, bold: true };
+      ws.getCell(`B${row}`).alignment = { horizontal: 'left', vertical: 'top', indent: 1 };
+
+      let segText = idi.segment || '';
+      if (idi.segment_nr) segText = 'Segment ' + idi.segment_nr + ' (' + segText + ')';
+      if (idi.cluster) segText += '\nCluster: ' + idi.cluster;
+      ws.getCell(`C${row}`).value = segText;
+      ws.getCell(`C${row}`).font = { name: 'Calibri', size: 10 };
+      ws.getCell(`C${row}`).alignment = { horizontal: 'left', vertical: 'top', wrapText: true, indent: 1 };
+
+      const profilParts = [];
+      if (idi.alter_min || idi.alter_max) {
+        const rangeStr = (idi.alter_max != null) ?
+          (idi.alter_min + '-' + idi.alter_max + ' Jahre') :
+          (idi.alter_min + '+ Jahre');
+        profilParts.push('Alter: ' + rangeStr);
+      }
+      if (Array.isArray(idi.profile_quoten)) {
+        for (const pq of idi.profile_quoten) {
+          if (pq.text) profilParts.push(pq.text);
+        }
+      }
+      ws.getCell(`D${row}`).value = profilParts.join('\n');
+      ws.getCell(`D${row}`).font = { name: 'Calibri', size: 10 };
+      ws.getCell(`D${row}`).alignment = { horizontal: 'left', vertical: 'top', wrapText: true, indent: 1 };
+
+      ws.getRow(row).height = Math.max(30, profilParts.length * 16);
+      row++;
+    }
+  }
+
+  return ws;
+}
+
+// ----------------------------------------------------------------------------
+// Sammler-Helfer
+// ----------------------------------------------------------------------------
+function isQuoteForGruppe(quoteArr, gruppeId) {
+  if (!Array.isArray(quoteArr) || quoteArr.length === 0) return null;
+  for (const sq of quoteArr) {
+    if (!sq) continue;
+    const fuerGruppen = Array.isArray(sq.gilt_fuer_gruppen) ? sq.gilt_fuer_gruppen : [];
+    // Nur match wenn explizit für diese Gruppe — leere Liste = global, NICHT pro-Gruppe
+    if (fuerGruppen.includes(gruppeId) || fuerGruppen.includes('alle')) {
+      return sq.text || '';
+    }
+  }
+  return null;
+}
+
+function isGlobalQuote(quoteArr) {
+  // Globale Quote: soll_quote vorhanden aber gilt_fuer_gruppen leer
+  if (!Array.isArray(quoteArr) || quoteArr.length === 0) return null;
+  for (const sq of quoteArr) {
+    if (!sq) continue;
+    const fuerGruppen = Array.isArray(sq.gilt_fuer_gruppen) ? sq.gilt_fuer_gruppen : [];
+    if (fuerGruppen.length === 0) {
+      return sq.text || '';
+    }
+  }
+  return null;
+}
+
+function collectAnforderungen(fragen, gruppeId) {
+  // Nur Gruppen-SPEZIFISCHE Anforderungen (soll_quote mit gilt_fuer_gruppen-Eintrag)
+  const ergebnisse = [];
+  for (const frage of fragen || []) {
+    if (frage.kategorie === 'entfaellt') continue;
+    const label = frage.kurz_label || frage.id;
+
+    if (Array.isArray(frage.antworten)) {
+      for (const ant of frage.antworten) {
+        if (ant.screenout) continue;
+        const soll = isQuoteForGruppe(ant.soll_quote, gruppeId);
+        if (soll != null) {
+          ergebnisse.push({
+            frageLabel: label,
+            codeText: 'Code ' + ant.code + ': ' + ant.text,
+            soll: '✓ ' + soll
+          });
+        }
+      }
+    }
+
+    if (Array.isArray(frage.items)) {
+      for (const item of frage.items) {
+        const soll = isQuoteForGruppe(item.soll_quote, gruppeId);
+        if (soll != null) {
+          ergebnisse.push({
+            frageLabel: label,
+            codeText: 'Item: ' + (item.item_label || ''),
+            soll: '✓ ' + soll
+          });
+        }
+      }
+    }
+  }
+  return ergebnisse;
+}
+
+function collectGlobalScreenouts(fragen) {
+  // Alle screenout=true Antworten + item.screenout_codes (gelten für alle Gruppen)
+  const ergebnisse = [];
+  for (const frage of fragen || []) {
+    if (frage.kategorie === 'entfaellt') continue;
+    const label = frage.kurz_label || frage.id;
+
+    if (Array.isArray(frage.antworten)) {
+      for (const ant of frage.antworten) {
+        if (ant.screenout) {
+          ergebnisse.push({
+            frageLabel: label,
+            codeText: 'Code ' + ant.code + ': ' + ant.text
+          });
+        }
+      }
+    }
+
+    if (Array.isArray(frage.items)) {
+      for (const item of frage.items) {
+        if (Array.isArray(item.screenout_codes) && item.screenout_codes.length > 0) {
+          const codeTexte = item.screenout_codes.map(c => {
+            const ant = (frage.antworten || []).find(a => String(a.code) === String(c));
+            return 'Code ' + c + (ant ? ': ' + ant.text : '');
+          });
+          ergebnisse.push({
+            frageLabel: label,
+            codeText: 'Item "' + (item.item_label || '') + '" bei → ' + codeTexte.join(' / ')
+          });
+        }
+      }
+    }
+  }
+  return ergebnisse;
+}
+
+function collectGlobalHinweise(fragen) {
+  // Quotenkommentare auf Frage-Ebene plus globale soll_quote-Hinweise (ohne Gruppen-Filter)
+  const ergebnisse = [];
+  for (const frage of fragen || []) {
+    if (frage.kategorie === 'entfaellt') continue;
+    const label = frage.kurz_label || frage.id;
+
+    // Quotenkommentar auf Frage-Ebene
+    if (frage.quotenkommentar && String(frage.quotenkommentar).trim()) {
+      ergebnisse.push({
+        frageLabel: label,
+        text: String(frage.quotenkommentar).trim()
+      });
+    }
+
+    // Globale soll_quote (gilt_fuer_gruppen leer) — z.B. F1 Geschlecht 50/50
+    if (Array.isArray(frage.antworten)) {
+      for (const ant of frage.antworten) {
+        if (ant.screenout) continue;
+        const global = isGlobalQuote(ant.soll_quote);
+        if (global != null) {
+          ergebnisse.push({
+            frageLabel: label,
+            text: 'Code ' + ant.code + ' (' + ant.text + '): ' + global
+          });
+        }
+      }
+    }
+    if (Array.isArray(frage.items)) {
+      for (const item of frage.items) {
+        const global = isGlobalQuote(item.soll_quote);
+        if (global != null) {
+          ergebnisse.push({
+            frageLabel: label,
+            text: 'Item "' + (item.item_label || '') + '": ' + global
+          });
+        }
+      }
+    }
+  }
+  return ergebnisse;
+}
+
 function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, setting, methode, quoteStartCol, allGruppen, options) {
   const opts = options || {};
 
@@ -1827,6 +2308,21 @@ export default async function handler(req, res) {
     result.created = new Date();
     const newSheetNames = [];
 
+    // v12.8: Quotenübersicht als ERSTES Sheet
+    // Wird VOR den Gruppen-Sheets erstellt, damit es ganz vorne erscheint.
+    // Sortierung der Gruppen passiert weiter unten — wir geben die unsortierte
+    // Liste rein, damit die Blöcke später in der gleichen Reihenfolge stehen wie
+    // die Sheets selbst. Achtung: gruppen wird unten in-place sortiert, also
+    // erst SORTIEREN, dann Overview bauen, dann durch sortierte Liste iterieren.
+    if (!isIDI) {
+      gruppen.sort((a, b) => getSortKey(a) - getSortKey(b));
+    }
+    try {
+      buildOverviewSheet(result, gruppen, fragenArr, studien_quoten, idiProfile, methode);
+    } catch (e) {
+      console.warn('Overview sheet failed (non-fatal):', e.message);
+    }
+
     const processGruppe = (gruppe, sheetName, fragenFG, includeIdiInfo) => {
       const dstWs = result.addWorksheet(sheetName);
       copyWorksheet(srcWs, dstWs, preMerges);
@@ -1861,6 +2357,7 @@ export default async function handler(req, res) {
       const hauptGruppe = { ...gruppen[0], methode };
       processGruppe(hauptGruppe, methode === 'VDI' ? 'VDIs' : 'IDIs', fragenArr, true);
     } else {
+      // v12.7: Sortierung passiert schon oben vor Overview
       for (const gruppe of gruppen) {
         gruppe.methode = gruppe.methode || methode;
         const sheetName = gruppe.id.replace(/[:\\/\?\*\[\]]/g, '').substring(0, 31);
