@@ -1102,8 +1102,54 @@ function formatSegmentQuotes(text, idiProfile) {
   return result;
 }
 
+// v12.6: Standort -> Firma Mapping. Die Frontend-Cowork-Form sendet aktuell
+// pauschal unternehmen='F&T' fuer alle Gruppen. Da unsere Studio-Locations
+// fest auf eine Firma gemappt sind, ueberschreiben wir das hier basierend
+// auf gruppe.standort. Bei unbekanntem Standort bleibt gruppe.unternehmen
+// erhalten (Fallback).
+const STANDORT_FIRMA_MAPPING = {
+  'F&T': ['Bochum', 'Düsseldorf', 'Mannheim', 'Hannover', 'Hamburg (Spitalerstrasse)'],
+  'm-s': ['Berlin', 'Köln', 'Nürnberg', 'Stuttgart', 'Hamburg (Mönckebergstrasse)'],
+  'H+G': ['Essen', 'München', 'Leipzig', 'Frankfurt (Roßmarkt)', 'Frankfurt (Holzgraben)'],
+};
+
+function resolveUnternehmenFromStandort(standort, fallback) {
+  if (!standort || typeof standort !== 'string') return fallback || 'F&T';
+  const s = standort.toLowerCase().trim();
+  // Tolerant: Sonderzeichen entfernen, damit Mönkebergstr/Mönckebergstr etc. matchen
+  const norm = s.replace(/[ßẞ]/g, 'ss').replace(/[^a-zäöü0-9 ()]/g, '');
+  for (const [firma, locations] of Object.entries(STANDORT_FIRMA_MAPPING)) {
+    for (const loc of locations) {
+      const locNorm = loc.toLowerCase().replace(/[ßẞ]/g, 'ss').replace(/[^a-zäöü0-9 ()]/g, '');
+      // Substring-Match in beide Richtungen (toleriert "Frankfurt" alleine, ebenso ausfuehrliche Schreibweise)
+      if (norm === locNorm) return firma;
+      if (norm.includes(locNorm) || locNorm.includes(norm)) return firma;
+      // Tippfehler-Toleranz: auch matchen wenn nach Streichen von 'c' identisch
+      // (fängt "Mönckeberg" vs "Mönkeberg" ab). Nur für längere Strings, damit
+      // kein Random-Match passiert.
+      if (norm.length >= 12 && locNorm.length >= 12) {
+        const normSimple = norm.replace(/c/g, '');
+        const locSimple = locNorm.replace(/c/g, '');
+        if (normSimple.includes(locSimple) || locSimple.includes(normSimple)) return firma;
+      }
+    }
+  }
+  // Spezialfall Hamburg: ohne Strassen-Suffix -> nicht eindeutig zuordbar
+  // -> bei nacktem 'hamburg' fallback nehmen
+  if (/^hamburg\s*$/.test(norm)) return fallback || 'F&T';
+  // Spezialfall Frankfurt: ohne Suffix -> H+G (alle Frankfurter Studios sind H+G)
+  if (/^frankfurt\s*$/.test(norm)) return 'H+G';
+  return fallback || 'F&T';
+}
+
 function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, setting, methode, quoteStartCol, allGruppen, options) {
   const opts = options || {};
+
+  // v12.6: Unternehmen aus Standort ableiten (Frontend sendet pauschal 'F&T')
+  const resolvedFirma = resolveUnternehmenFromStandort(gruppe.standort, gruppe.unternehmen);
+  if (resolvedFirma !== gruppe.unternehmen) {
+    gruppe.unternehmen = resolvedFirma;
+  }
   const compactMatrix = opts.compactMatrix === true;
   const compactThreshold = opts.compactMatrixThreshold || 5;
   const baseHmap = HEADER_MAP[setting] || HEADER_MAP.offline;
@@ -1784,6 +1830,9 @@ export default async function handler(req, res) {
       const tnEnd = TN_START + brutto - 1;
 
       addConditionalFormats(dstWs, tnEnd);
+
+      // v12.6: Unternehmen anhand Standort ueberschreiben, BEVOR Logo gesetzt wird
+      gruppe.unternehmen = resolveUnternehmenFromStandort(gruppe.standort, gruppe.unternehmen);
       addLogo(dstWs, result, gruppe.unternehmen, setting);
 
       // v11: nur dem IDI/VDI-Sheet die IDI-Info-Blöcke geben
