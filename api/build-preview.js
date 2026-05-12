@@ -738,15 +738,20 @@ function writeQuestionColumn(ws, col, label, note, antList, quoteText, tnEnd, gr
   const cellBorder = isLastInGroup ? borderWithThickRight(THIN_BORDER) : { ...THIN_BORDER };
   let headerBorder = isLastInGroup ? borderWithThickRight(HEADER_BORDER) : HEADER_BORDER;
 
-  // PATCH 3+6: Bedingungs-Markierung — gelber Rahmen bei conditional Fragen
+  // PATCH 3+6: Bedingungs-Markierung — Rahmen bei conditional Fragen
+  // v12.12: Pro Cluster (gleiche Bedingung) eigene Rahmenfarbe.
   const isConditional = frage && isConditionalFrage(frage);
+  let clusterColorArgb = null;
   if (isConditional) {
-    const yellowMedium = { style: 'medium', color: { argb: 'FFD4A017' } };
+    const clusterEntry = (typeof __CLUSTER_MAP__ !== 'undefined' && __CLUSTER_MAP__ && frage && frage.id) ?
+      __CLUSTER_MAP__[frage.id] : null;
+    clusterColorArgb = clusterEntry ? clusterEntry.colorArgb : 'FFD4A017';
+    const clusterBorder = { style: 'medium', color: { argb: clusterColorArgb } };
     headerBorder = {
-      top: yellowMedium,
-      bottom: yellowMedium,
-      left: yellowMedium,
-      right: isLastInGroup ? borderWithThickRight({}).right : yellowMedium,
+      top: clusterBorder,
+      bottom: clusterBorder,
+      left: clusterBorder,
+      right: isLastInGroup ? borderWithThickRight({}).right : clusterBorder,
     };
   }
 
@@ -1152,6 +1157,57 @@ function resolveUnternehmenFromStandort(standort, fallback) {
   return fallback || 'F&T';
 }
 
+// v12.12: Cluster-Farbsystem für Bedingte Fragen
+// Jede unique Bedingung bekommt eine eigene Farbe. Fragen mit gleicher
+// Bedingung teilen die Farbe — so erkennt der Recruiter visuell welche
+// Fragen zusammengehören (z.B. "Q11.2a + Q11.2b sind beide nur für
+// hohes C Nutzer relevant").
+const CLUSTER_COLORS = [
+  'FF1E88E5', // blau
+  'FF43A047', // grün
+  'FFFB8C00', // orange
+  'FF8E24AA', // lila
+  'FFE53935', // rot
+  'FF00897B', // teal
+  'FFFFB300', // gelb-orange
+  'FF6D4C41', // braun
+];
+
+// Normalisiert eine Bedingung für den Cluster-Key (case-insensitive, ohne
+// Whitespace/Sonderzeichen-Variationen). So matchen "Nur fragen wenn Q11 = X"
+// und "Nur wenn Q11 = X" auf den gleichen Cluster.
+function normalizeBedingung(b) {
+  if (!b) return '';
+  return String(b).toLowerCase()
+    .replace(/\s+/g, ' ')
+    .replace(/[„""']/g, '')
+    .replace(/^nur (fragen )?wenn[,:]?\s*/, '')
+    .replace(/^nur (für|fuer)\s*/, '')
+    .trim();
+}
+
+// Berechnet die Cluster-Map: {frageId: {colorArgb, key}}
+// Reihenfolge der Cluster basiert auf erstem Auftreten in fragen[].
+// v12.12: Modulscope-Variable für aktuelle Cluster-Map (wird pro Build gesetzt)
+let __CLUSTER_MAP__ = null;
+
+function computeClusterMap(fragen) {
+  const map = {};
+  const keyToColor = {};
+  let colorIdx = 0;
+  for (const frage of fragen || []) {
+    if (!frage || !frage.bedingung) continue;
+    const key = normalizeBedingung(frage.bedingung);
+    if (!key) continue;
+    if (!keyToColor[key]) {
+      keyToColor[key] = CLUSTER_COLORS[colorIdx % CLUSTER_COLORS.length];
+      colorIdx++;
+    }
+    map[frage.id] = { colorArgb: keyToColor[key], key };
+  }
+  return map;
+}
+
 // v12.7: Sheet-Sortierung nach Datum + Uhrzeit (chronologisch)
 // Frontend liefert datum als "Mo. 19.05.", "Di. 20.05." (Wochentag + DD.MM.).
 // Uhrzeit als "14:30 - 16:30". Wir extrahieren Tag, Monat, Stunde, Minute zum
@@ -1327,6 +1383,65 @@ function buildOverviewSheet(workbook, gruppen, fragen, studienQuoten, idiProfile
   }
 
   // =========================================================================
+  // SEKTION 3.5: CLUSTER-LEGENDE (Farbcodierung bedingter Fragen)
+  // =========================================================================
+  if (__CLUSTER_MAP__ && Object.keys(__CLUSTER_MAP__).length > 0) {
+    ws.mergeCells(`B${row}:D${row}`);
+    const ch = ws.getCell(`B${row}`);
+    ch.value = '🎨 FARB-CLUSTER: Zusammenhängende bedingte Fragen';
+    ch.font = { name: 'Calibri', size: 12, bold: true, color: { argb: 'FFFFFFFF' } };
+    ch.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF595959' } };
+    ch.alignment = { horizontal: 'left', vertical: 'middle', indent: 1 };
+    ws.getRow(row).height = 22;
+    row++;
+
+    // Pro Cluster eine Zeile: Farbe + Bedingung + welche Fragen
+    const clusterToFragen = {};
+    for (const [fid, info] of Object.entries(__CLUSTER_MAP__)) {
+      const key = info.key;
+      if (!clusterToFragen[key]) {
+        clusterToFragen[key] = { color: info.colorArgb, key, fragen: [] };
+      }
+      // Frage-Label nachschlagen
+      const frage = fragen.find(f => f.id === fid);
+      if (frage) {
+        clusterToFragen[key].fragen.push({
+          id: fid,
+          label: frage.kurz_label || fid,
+          bedingung: frage.bedingung || ''
+        });
+      }
+    }
+    for (const cluster of Object.values(clusterToFragen)) {
+      const fragenList = cluster.fragen.map(f => f.label).join(', ');
+      const bedingung = cluster.fragen[0] ? cluster.fragen[0].bedingung : '';
+
+      // Spalte B: farbiger Indikator
+      const bc = ws.getCell(`B${row}`);
+      bc.value = '●';
+      bc.font = { name: 'Calibri', size: 18, bold: true, color: { argb: cluster.color } };
+      bc.alignment = { horizontal: 'center', vertical: 'middle' };
+
+      // Spalte C: Fragen-Liste
+      const cc = ws.getCell(`C${row}`);
+      cc.value = fragenList;
+      cc.font = { name: 'Calibri', size: 10, bold: true, color: { argb: cluster.color } };
+      cc.alignment = { horizontal: 'left', vertical: 'middle', wrapText: true, indent: 1 };
+
+      // Spalte D: Bedingung
+      const dc = ws.getCell(`D${row}`);
+      dc.value = '⚠ ' + bedingung;
+      dc.font = { name: 'Calibri', size: 10, italic: true };
+      dc.alignment = { horizontal: 'left', vertical: 'middle', wrapText: true, indent: 1 };
+
+      ws.getRow(row).height = Math.max(22, Math.ceil(bedingung.length / 60) * 18);
+      ws.getRow(row).outlineLevel = 1;
+      row++;
+    }
+    row += 2;
+  }
+
+  // =========================================================================
   // SEKTION 4: PRO GRUPPE EIN BLOCK (nur Gruppen-spezifische Anforderungen)
   // =========================================================================
   const COLORS = [
@@ -1390,7 +1505,7 @@ function buildOverviewSheet(workbook, gruppen, fragen, studienQuoten, idiProfile
     row++;
 
     // Anforderungen
-    const anforderungen = collectAnforderungen(fragen, gruppe.id);
+    const anforderungen = collectAnforderungen(fragen, gruppe.id, __CLUSTER_MAP__);
     if (anforderungen.length > 0) {
       ws.mergeCells(`B${row}:D${row}`);
       const ah = ws.getCell(`B${row}`);
@@ -1416,9 +1531,19 @@ function buildOverviewSheet(workbook, gruppen, fragen, studienQuoten, idiProfile
       row++;
 
       for (const eintrag of anforderungen) {
-        ws.getCell(`B${row}`).value = eintrag.frageLabel;
-        ws.getCell(`B${row}`).font = { name: 'Calibri', size: 10, bold: true };
-        ws.getCell(`B${row}`).alignment = { horizontal: 'left', vertical: 'top', wrapText: true, indent: 1 };
+        const bCell = ws.getCell(`B${row}`);
+        // v12.12: Bei bedingter Frage Cluster-Indikator vorne als kleines Symbol
+        const labelPrefix = eintrag.clusterColor ? '● ' : '';
+        bCell.value = labelPrefix + eintrag.frageLabel;
+        bCell.font = { name: 'Calibri', size: 10, bold: true,
+          color: { argb: eintrag.clusterColor || 'FF000000' } };
+        bCell.alignment = { horizontal: 'left', vertical: 'top', wrapText: true, indent: 1 };
+        // Linke Border in Cluster-Farbe wenn bedingt
+        if (eintrag.clusterColor) {
+          bCell.border = {
+            left: { style: 'thick', color: { argb: eintrag.clusterColor } }
+          };
+        }
 
         ws.getCell(`C${row}`).value = eintrag.codeText;
         ws.getCell(`C${row}`).font = { name: 'Calibri', size: 10 };
@@ -1536,12 +1661,16 @@ function isGlobalQuote(quoteArr) {
   return null;
 }
 
-function collectAnforderungen(fragen, gruppeId) {
+function collectAnforderungen(fragen, gruppeId, clusterMap) {
   // Nur Gruppen-SPEZIFISCHE Anforderungen (soll_quote mit gilt_fuer_gruppen-Eintrag)
+  // v12.12: clusterColor mitgeben für bedingte Fragen
   const ergebnisse = [];
   for (const frage of fragen || []) {
     if (frage.kategorie === 'entfaellt') continue;
     const label = frage.kurz_label || frage.id;
+    const clusterEntry = (clusterMap && frage.id) ? clusterMap[frage.id] : null;
+    const clusterColor = clusterEntry ? clusterEntry.colorArgb : null;
+    const bedingungText = frage.bedingung || '';
 
     if (Array.isArray(frage.antworten)) {
       for (const ant of frage.antworten) {
@@ -1551,7 +1680,9 @@ function collectAnforderungen(fragen, gruppeId) {
           ergebnisse.push({
             frageLabel: label,
             codeText: 'Code ' + ant.code + ': ' + ant.text,
-            soll: '✓ ' + soll
+            soll: '✓ ' + soll,
+            clusterColor,
+            bedingungText
           });
         }
       }
@@ -1564,7 +1695,9 @@ function collectAnforderungen(fragen, gruppeId) {
           ergebnisse.push({
             frageLabel: label,
             codeText: 'Item: ' + (item.item_label || ''),
-            soll: '✓ ' + soll
+            soll: '✓ ' + soll,
+            clusterColor,
+            bedingungText
           });
         }
       }
@@ -2350,6 +2483,9 @@ export default async function handler(req, res) {
     result.created = new Date();
     const newSheetNames = [];
 
+    // v12.12: Cluster-Map berechnen (vor Overview + Gruppen-Sheets)
+    __CLUSTER_MAP__ = computeClusterMap(fragenArr);
+
     // v12.8: Quotenübersicht als ERSTES Sheet
     // Wird VOR den Gruppen-Sheets erstellt, damit es ganz vorne erscheint.
     // Sortierung der Gruppen passiert weiter unten — wir geben die unsortierte
@@ -2470,7 +2606,7 @@ export default async function handler(req, res) {
         terminBlocksCount: builderOptions.termin_blocks?.length || 0,
         laufzeitVon: builderOptions.laufzeitVon,
         laufzeitBis: builderOptions.laufzeitBis,
-        version: 'v12.11-quote-bedingung-marker',
+        version: 'v12.12-cluster-farben',
       },
     });
   } catch (err) {
@@ -2482,7 +2618,7 @@ export default async function handler(req, res) {
       error: err?.message || 'Unknown error',
       errorType: err?.name || 'Error',
       stack: err?.stack ? String(err.stack).split('\n').slice(0, 8) : null,
-      version: 'v12.11-quote-bedingung-marker',
+      version: 'v12.12-cluster-farben',
     });
   }
 }
