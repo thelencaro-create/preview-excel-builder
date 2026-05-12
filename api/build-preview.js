@@ -815,7 +815,17 @@ function writeQuestionColumn(ws, col, label, note, antList, quoteText, tnEnd, gr
   // Text bereinigt von Code-Syntax + Sub-Quoten pro Antwort-Code (falls vorhanden)
   const cleanedQuote = cleanQuoteText(quoteText);
   const subQuoteList = buildSubQuoteList(antList, frage, gruppe, allGruppen);
-  const finalQuoteText = [cleanedQuote, subQuoteList].filter(Boolean).join('\n');
+  // v12.11: Bedingungs-Hinweis bei 🔀-Fragen explizit als ERSTE Zeile, damit der
+  // Recruiter sofort sieht WANN diese Frage gestellt wird
+  let bedingungHinweis = '';
+  if (frage && frage.bedingung && String(frage.bedingung).trim()) {
+    const bed = String(frage.bedingung).trim();
+    // Nicht doppeln falls schon im quoteText drin
+    if (!cleanedQuote || !cleanedQuote.includes(bed)) {
+      bedingungHinweis = '⚠ Nur stellen wenn: ' + bed;
+    }
+  }
+  const finalQuoteText = [bedingungHinweis, cleanedQuote, subQuoteList].filter(Boolean).join('\n\n');
   if (finalQuoteText) {
     // v11.3: Wenn quoteRow vom Caller übergeben wurde, an dieser einheitlichen
     // Position schreiben (1 Zeile Abstand unter der längsten Antwort-Liste);
@@ -2054,6 +2064,8 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
       const totalCols = itemsToColumns.length + (otherItems.length > 0 ? 1 : 0);
       let writtenInMatrix = 0;
 
+      // v12.11: Globale Matrix-Quote: bei nicht-genannten Items in 1. Spalte zeigen
+      let matrixQuoteShownInColumn = false;
       for (const item of itemsToColumns) {
         writtenInMatrix++;
         const isLast = (writtenInMatrix === totalCols);
@@ -2065,12 +2077,23 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
         }
         if (!itemQuote && item.marker === 'X') {
           const codes = (item.screenout_codes || []).join(', ');
-          itemQuote = codes
+          const markerText = codes
             ? `Quotenrelevant: Code ${codes} = Screenout`
             : 'Quotenrelevant: Item muss zutreffen (Marker X)';
+          // v12.11: Marker-Text NUR als Zusatz zu globaler Quote, nicht als Ersatz
+          itemQuote = markerText;
         }
         if (!itemQuote && item.marker === 'Y') {
           itemQuote = 'Quotenrelevant: Item darf NICHT zutreffen (Marker Y)';
+        }
+        // v12.11: Bei der ERSTEN Item-Spalte zusätzlich die globale matrixQuoteText
+        // anhängen wenn sie noch nirgends angezeigt wurde. So sieht der Recruiter
+        // bei Q10/Q12 die Frage-weite Anweisung.
+        if (!matrixQuoteShownInColumn && matrixQuoteText && !itemQuote.includes(matrixQuoteText)) {
+          itemQuote = itemQuote
+            ? `📌 Gesamt-Quote: ${matrixQuoteText}\n\n${itemQuote}`
+            : `📌 Gesamt-Quote: ${matrixQuoteText}`;
+          matrixQuoteShownInColumn = true;
         }
         // Item-Soll-Quote (v11: Liste mit gilt_fuer_gruppen-Filter)
         const itemQuotes = getSollQuoteList(item.soll_quote);
@@ -2447,7 +2470,7 @@ export default async function handler(req, res) {
         terminBlocksCount: builderOptions.termin_blocks?.length || 0,
         laufzeitVon: builderOptions.laufzeitVon,
         laufzeitBis: builderOptions.laufzeitBis,
-        version: 'v12.10-kollabierbare-bloecke',
+        version: 'v12.11-quote-bedingung-marker',
       },
     });
   } catch (err) {
@@ -2459,7 +2482,7 @@ export default async function handler(req, res) {
       error: err?.message || 'Unknown error',
       errorType: err?.name || 'Error',
       stack: err?.stack ? String(err.stack).split('\n').slice(0, 8) : null,
-      version: 'v12.10-kollabierbare-bloecke',
+      version: 'v12.11-quote-bedingung-marker',
     });
   }
 }
