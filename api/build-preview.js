@@ -1380,6 +1380,21 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
     }
   }
 
+  // v12.4: Phantom-Spalten links der quoteStartCol leeren
+  // (z.B. T6='TB', U6='PaySite' aus alten Template-Versionen, die nicht zu den
+  // offiziellen Tracking-Headern gehören). Konservativ: nur bekannte Phantom-Labels.
+  const PHANTOM_HEADERS = ['tb', 'paysite', 'pay site', 'pay-site', 'paysite '];
+  for (let col = 1; col < quoteStartCol; col++) {
+    for (const row of [MATRIX_HEADER_ROW, HEADER_ROW]) {
+      const c = ws.getCell(row, col);
+      if (!c.value) continue;
+      const v = String(c.value).toLowerCase().trim();
+      if (PHANTOM_HEADERS.includes(v)) {
+        c.value = null;
+      }
+    }
+  }
+
   // 6) Fragen-Spalten aufbauen
   //
   // v11.4: Soziodemographische Fragen sortieren — Geschlecht + Alter immer
@@ -1816,7 +1831,7 @@ export default async function handler(req, res) {
         terminBlocksCount: builderOptions.termin_blocks?.length || 0,
         laufzeitVon: builderOptions.laufzeitVon,
         laufzeitBis: builderOptions.laufzeitBis,
-        version: 'v12.3-segment-named-quotes',
+        version: 'v12.4-phantom-headers-cleanup',
       },
     });
   } catch (err) {
@@ -1828,7 +1843,7 @@ export default async function handler(req, res) {
       error: err?.message || 'Unknown error',
       errorType: err?.name || 'Error',
       stack: err?.stack ? String(err.stack).split('\n').slice(0, 8) : null,
-      version: 'v12.3-segment-named-quotes',
+      version: 'v12.4-phantom-headers-cleanup',
     });
   }
 }
