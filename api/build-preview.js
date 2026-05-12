@@ -738,21 +738,17 @@ function writeQuestionColumn(ws, col, label, note, antList, quoteText, tnEnd, gr
   const cellBorder = isLastInGroup ? borderWithThickRight(THIN_BORDER) : { ...THIN_BORDER };
   let headerBorder = isLastInGroup ? borderWithThickRight(HEADER_BORDER) : HEADER_BORDER;
 
-  // PATCH 3+6: Bedingungs-Markierung — Rahmen bei conditional Fragen
-  // v12.12: Pro Cluster (gleiche Bedingung) eigene Rahmenfarbe.
+  // PATCH 3+6: Bedingungs-Markierung bei conditional Fragen
+  // v12.13: Statt farbigem Rahmen wird der Header-HINTERGRUND in Cluster-Farbe
+  // (pastel-aufgehellt) eingefärbt. Rahmen bleibt normaler header border.
   const isConditional = frage && isConditionalFrage(frage);
   let clusterColorArgb = null;
+  let clusterLightArgb = null;
   if (isConditional) {
     const clusterEntry = (typeof __CLUSTER_MAP__ !== 'undefined' && __CLUSTER_MAP__ && frage && frage.id) ?
       __CLUSTER_MAP__[frage.id] : null;
     clusterColorArgb = clusterEntry ? clusterEntry.colorArgb : 'FFD4A017';
-    const clusterBorder = { style: 'medium', color: { argb: clusterColorArgb } };
-    headerBorder = {
-      top: clusterBorder,
-      bottom: clusterBorder,
-      left: clusterBorder,
-      right: isLastInGroup ? borderWithThickRight({}).right : clusterBorder,
-    };
+    clusterLightArgb = clusterEntry ? clusterEntry.lightArgb : 'FFFFF2CC';
   }
 
   const h = ws.getCell(HEADER_ROW, col);
@@ -779,7 +775,7 @@ function writeQuestionColumn(ws, col, label, note, antList, quoteText, tnEnd, gr
     h.font = { bold: true, name: 'Arial', size: 9, color: { argb: 'FF000000' } };
   }
   h.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
-  h.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: isConditional ? 'FFFFF2CC' : COLORS.HEADER_GREY } };
+  h.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: isConditional ? (clusterLightArgb || 'FFFFF2CC') : COLORS.HEADER_GREY } };
   h.border = headerBorder;
   if (note) h.note = note;
 
@@ -1172,6 +1168,18 @@ const CLUSTER_COLORS = [
   'FFFFB300', // gelb-orange
   'FF6D4C41', // braun
 ];
+// v12.13: Aufgehellte Pastell-Varianten passend zu CLUSTER_COLORS (gleiche Index-Position)
+// Für Hintergrund von Frage-Headern, damit Schrift lesbar bleibt.
+const CLUSTER_COLORS_LIGHT = [
+  'FFD3E7FA', // blau pastel
+  'FFD8EFD7', // grün pastel
+  'FFFEE4CC', // orange pastel
+  'FFEBD7F3', // lila pastel
+  'FFFAD3D2', // rot pastel
+  'FFCCE7E4', // teal pastel
+  'FFFFEFC9', // gelb-orange pastel
+  'FFDDD0CC', // braun pastel
+];
 
 // Normalisiert eine Bedingung für den Cluster-Key (case-insensitive, ohne
 // Whitespace/Sonderzeichen-Variationen). So matchen "Nur fragen wenn Q11 = X"
@@ -1193,17 +1201,22 @@ let __CLUSTER_MAP__ = null;
 
 function computeClusterMap(fragen) {
   const map = {};
-  const keyToColor = {};
+  const keyToIdx = {};
   let colorIdx = 0;
   for (const frage of fragen || []) {
     if (!frage || !frage.bedingung) continue;
     const key = normalizeBedingung(frage.bedingung);
     if (!key) continue;
-    if (!keyToColor[key]) {
-      keyToColor[key] = CLUSTER_COLORS[colorIdx % CLUSTER_COLORS.length];
+    if (!(key in keyToIdx)) {
+      keyToIdx[key] = colorIdx % CLUSTER_COLORS.length;
       colorIdx++;
     }
-    map[frage.id] = { colorArgb: keyToColor[key], key };
+    const i = keyToIdx[key];
+    map[frage.id] = {
+      colorArgb: CLUSTER_COLORS[i],
+      lightArgb: CLUSTER_COLORS_LIGHT[i],
+      key
+    };
   }
   return map;
 }
@@ -1532,17 +1545,18 @@ function buildOverviewSheet(workbook, gruppen, fragen, studienQuoten, idiProfile
 
       for (const eintrag of anforderungen) {
         const bCell = ws.getCell(`B${row}`);
-        // v12.12: Bei bedingter Frage Cluster-Indikator vorne als kleines Symbol
+        // v12.13: Bei bedingter Frage Cluster-Indikator vorne + Hintergrund-Akzent
         const labelPrefix = eintrag.clusterColor ? '● ' : '';
         bCell.value = labelPrefix + eintrag.frageLabel;
         bCell.font = { name: 'Calibri', size: 10, bold: true,
           color: { argb: eintrag.clusterColor || 'FF000000' } };
         bCell.alignment = { horizontal: 'left', vertical: 'top', wrapText: true, indent: 1 };
-        // Linke Border in Cluster-Farbe wenn bedingt
-        if (eintrag.clusterColor) {
-          bCell.border = {
-            left: { style: 'thick', color: { argb: eintrag.clusterColor } }
-          };
+        // v12.13: Hintergrund-Fill statt Border (alle 3 Zellen B/C/D)
+        if (eintrag.clusterLight) {
+          const fillSpec = { type: 'pattern', pattern: 'solid', fgColor: { argb: eintrag.clusterLight } };
+          bCell.fill = fillSpec;
+          ws.getCell(`C${row}`).fill = fillSpec;
+          ws.getCell(`D${row}`).fill = fillSpec;
         }
 
         ws.getCell(`C${row}`).value = eintrag.codeText;
@@ -1670,6 +1684,7 @@ function collectAnforderungen(fragen, gruppeId, clusterMap) {
     const label = frage.kurz_label || frage.id;
     const clusterEntry = (clusterMap && frage.id) ? clusterMap[frage.id] : null;
     const clusterColor = clusterEntry ? clusterEntry.colorArgb : null;
+    const clusterLight = clusterEntry ? clusterEntry.lightArgb : null;
     const bedingungText = frage.bedingung || '';
 
     if (Array.isArray(frage.antworten)) {
@@ -1682,6 +1697,7 @@ function collectAnforderungen(fragen, gruppeId, clusterMap) {
             codeText: 'Code ' + ant.code + ': ' + ant.text,
             soll: '✓ ' + soll,
             clusterColor,
+            clusterLight,
             bedingungText
           });
         }
@@ -1697,6 +1713,7 @@ function collectAnforderungen(fragen, gruppeId, clusterMap) {
             codeText: 'Item: ' + (item.item_label || ''),
             soll: '✓ ' + soll,
             clusterColor,
+            clusterLight,
             bedingungText
           });
         }
@@ -2606,7 +2623,7 @@ export default async function handler(req, res) {
         terminBlocksCount: builderOptions.termin_blocks?.length || 0,
         laufzeitVon: builderOptions.laufzeitVon,
         laufzeitBis: builderOptions.laufzeitBis,
-        version: 'v12.12-cluster-farben',
+        version: 'v12.13-cluster-hintergrund',
       },
     });
   } catch (err) {
@@ -2618,7 +2635,7 @@ export default async function handler(req, res) {
       error: err?.message || 'Unknown error',
       errorType: err?.name || 'Error',
       stack: err?.stack ? String(err.stack).split('\n').slice(0, 8) : null,
-      version: 'v12.12-cluster-farben',
+      version: 'v12.13-cluster-hintergrund',
     });
   }
 }
