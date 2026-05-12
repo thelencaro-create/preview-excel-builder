@@ -1180,6 +1180,14 @@ function buildOverviewSheet(workbook, gruppen, fragen, studienQuoten, idiProfile
     properties: { tabColor: { argb: 'FFFFC000' } }
   });
 
+  // v12.10: Outline-Properties für Ein-/Ausklappen
+  // summaryBelow:false = Plus/Minus erscheint OBERHALB des gruppierten Bereichs
+  // (also direkt am Section-Header, nicht am Ende)
+  ws.properties.outlineProperties = {
+    summaryBelow: false,
+    summaryRight: false
+  };
+
   ws.getColumn(1).width = 4;
   ws.getColumn(2).width = 24;
   ws.getColumn(3).width = 60;
@@ -1220,6 +1228,7 @@ function buildOverviewSheet(workbook, gruppen, fragen, studienQuoten, idiProfile
       cc.alignment = { horizontal: 'left', vertical: 'middle', wrapText: true, indent: 1 };
       cc.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF2F2F2' } };
       ws.getRow(row).height = Math.max(20, Math.ceil(q.length / 90) * 18);
+      ws.getRow(row).outlineLevel = 1;
       row++;
     }
     row += 2;
@@ -1250,6 +1259,7 @@ function buildOverviewSheet(workbook, gruppen, fragen, studienQuoten, idiProfile
       h.alignment = { horizontal: 'left', vertical: 'middle', indent: 1 };
     }
     ws.getRow(row).height = 20;
+    ws.getRow(row).outlineLevel = 1;
     row++;
 
     for (const eintrag of globalScreenouts) {
@@ -1267,6 +1277,7 @@ function buildOverviewSheet(workbook, gruppen, fragen, studienQuoten, idiProfile
 
       const maxLen = (eintrag.codeText || '').length;
       ws.getRow(row).height = Math.max(18, Math.min(60, Math.ceil(maxLen / 50) * 18));
+      ws.getRow(row).outlineLevel = 1;
       row++;
     }
     row += 2;
@@ -1299,6 +1310,7 @@ function buildOverviewSheet(workbook, gruppen, fragen, studienQuoten, idiProfile
       t.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFF9E6' } };
 
       ws.getRow(row).height = Math.max(20, Math.min(80, Math.ceil(h.text.length / 70) * 18));
+      ws.getRow(row).outlineLevel = 1;
       row++;
     }
     row += 2;
@@ -1349,6 +1361,7 @@ function buildOverviewSheet(workbook, gruppen, fragen, studienQuoten, idiProfile
     mc.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: farbe.body } };
     mc.alignment = { horizontal: 'left', vertical: 'middle', indent: 1 };
     ws.getRow(row).height = 20;
+    ws.getRow(row).outlineLevel = 1;
     row++;
 
     // Zuordnungs-Kriterien (Klartext)
@@ -1360,8 +1373,10 @@ function buildOverviewSheet(workbook, gruppen, fragen, studienQuoten, idiProfile
       zc.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: farbe.body } };
       zc.alignment = { horizontal: 'left', vertical: 'middle', wrapText: true, indent: 1 };
       ws.getRow(row).height = Math.max(30, Math.ceil(gruppe.zuordnungs_kriterien.length / 90) * 18);
+      ws.getRow(row).outlineLevel = 1;
       row++;
     }
+    ws.getRow(row).outlineLevel = 1;
     row++;
 
     // Anforderungen
@@ -1373,6 +1388,7 @@ function buildOverviewSheet(workbook, gruppen, fragen, studienQuoten, idiProfile
       ah.font = { name: 'Calibri', size: 11, bold: true, color: { argb: 'FF548235' } };
       ah.alignment = { horizontal: 'left', vertical: 'middle', indent: 1 };
       ws.getRow(row).height = 22;
+      ws.getRow(row).outlineLevel = 1;
       row++;
 
       // Header-Zeile
@@ -1386,6 +1402,7 @@ function buildOverviewSheet(workbook, gruppen, fragen, studienQuoten, idiProfile
         hc.alignment = { horizontal: 'left', vertical: 'middle', indent: 1 };
       }
       ws.getRow(row).height = 20;
+      ws.getRow(row).outlineLevel = 1;
       row++;
 
       for (const eintrag of anforderungen) {
@@ -1403,6 +1420,7 @@ function buildOverviewSheet(workbook, gruppen, fragen, studienQuoten, idiProfile
 
         const maxLen = Math.max((eintrag.codeText || '').length, (eintrag.soll || '').length);
         ws.getRow(row).height = Math.max(18, Math.min(60, Math.ceil(maxLen / 50) * 18));
+        ws.getRow(row).outlineLevel = 1;
         row++;
       }
     } else {
@@ -1412,6 +1430,7 @@ function buildOverviewSheet(workbook, gruppen, fragen, studienQuoten, idiProfile
       empty.font = { name: 'Calibri', size: 10, italic: true, color: { argb: 'FF808080' } };
       empty.alignment = { horizontal: 'left', vertical: 'middle', indent: 1 };
       ws.getRow(row).height = 20;
+      ws.getRow(row).outlineLevel = 1;
       row++;
     }
 
