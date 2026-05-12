@@ -1123,13 +1123,31 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
   clearPrefilledTNCells(ws, tnEnd, quoteStartCol);
 
   // 2) Header befüllen
+  // v12.5: Studio-Label und Projekt-Nr.-Label je Unternehmen anpassen
+  // (F&T / m-s / H+G) — alle Templates basieren auf dem F&T-Layout, wir
+  // überschreiben nur die zwei Studio-/Projekt-Nr.-Labels und das Logo.
+  const UNT = gruppe.unternehmen || 'F&T';
+  const studioPrefix = (UNT === 'm-s') ? 'm-s' : (UNT === 'H+G' ? 'H+G' : 'F&T');
   if (hmap.studioLabel) {
-    ws.getCell(hmap.studioLabel).value = 'F&T Standort';
+    ws.getCell(hmap.studioLabel).value = `${studioPrefix} Standort`;
   }
   if (hmap.studioWert && gruppe.standort) {
     ws.getCell(hmap.studioWert).value = gruppe.standort;
   }
-  ws.getCell(hmap.terminWert).value     = gruppe.termin || `${gruppe.datum || ''} ${gruppe.uhrzeit || ''}`.trim();
+  // v12.5: Termin-Header sauber aus datum + uhrzeit bauen.
+  // gruppe.termin kommt vom Parser oft als "KW21, Mai 2026" oder Range
+  // ("Di. 19.05. – Do. 21.05.") — das ist für GD-Sheets (1 Termin pro Sheet)
+  // nicht das, was hier hin soll. Wir bevorzugen pro Sheet den exakten
+  // Termin "Datum Uhrzeit".
+  let terminText = '';
+  if (gruppe.datum && gruppe.uhrzeit) {
+    terminText = `${gruppe.datum} ${gruppe.uhrzeit}`.trim();
+  } else if (gruppe.termin && !/KW\s*\d|Januar|Februar|März|April|Mai|Juni|Juli|August|September|Oktober|November|Dezember/i.test(gruppe.termin)) {
+    terminText = gruppe.termin;
+  } else {
+    terminText = `${gruppe.datum || ''} ${gruppe.uhrzeit || ''}`.trim();
+  }
+  ws.getCell(hmap.terminWert).value     = terminText;
   ws.getCell(hmap.kunde).value          = kundenname || '';
   // PATCH 5: Zielgruppe + Zuordnungs-Kriterien als Tooltip am Zielgruppe-Feld
   ws.getCell(hmap.zielgruppe).value     = gruppe.zielgruppe || '';
@@ -1137,7 +1155,27 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
     ws.getCell(hmap.zielgruppe).note = `Zuordnungs-Kriterien:\n${gruppe.zuordnungs_kriterien}`;
   }
   ws.getCell(hmap.projekt).value        = projektname;
+  // v12.5: Projekt-Nr.-Label je Unternehmen überschreiben
+  // hmap.projNr ist die Wert-Zelle; das Label sitzt 1 Spalte links davon
   ws.getCell(hmap.projNr).value         = projektnummer;
+  try {
+    const projNrMatch = String(hmap.projNr).match(/^([A-Z]+)(\d+)$/);
+    if (projNrMatch) {
+      const valColLetter = projNrMatch[1];
+      const valRow = parseInt(projNrMatch[2]);
+      // Spalten-Index aus Buchstabe ermitteln
+      let valColIdx = 0;
+      for (const c of valColLetter) valColIdx = valColIdx * 26 + (c.charCodeAt(0) - 64);
+      if (valColIdx > 1) {
+        const labelCell = ws.getCell(valRow, valColIdx - 1);
+        // Nur überschreiben, wenn aktuell ein Projekt-Nr-artiges Label drinsteht
+        const curLabel = String(labelCell.value || '').trim();
+        if (/projekt[-\s]?nr/i.test(curLabel)) {
+          labelCell.value = `${studioPrefix} Projekt-Nr.`;
+        }
+      }
+    }
+  } catch (e) { /* fail-soft */ }
   ws.getCell(hmap.incentive).value      = gruppe.incentive || '';
 
   // Header-Werte links-bündig ausrichten (vereinheitlicht für alle Templates)
@@ -1779,8 +1817,13 @@ export default async function handler(req, res) {
     }
 
     const buffer = await result.xlsx.writeBuffer();
-    const dateiname = `${projektnummer}_${projektname}_Preview.xlsx`
-      .replace(/[^a-zA-Z0-9_\-\.äöüÄÖÜß ]/g, '_');
+    // v12.5: Dateiname kompakt — Spaces aus Projektnummer entfernen,
+    // einheitlich mit _ verbinden: "26 1051 6264" -> "26_1051_6264"
+    const projNrCompact = String(projektnummer || '').replace(/\s+/g, '_').trim();
+    const projNameClean = String(projektname || '').replace(/[^a-zA-Z0-9äöüÄÖÜß]+/g, '_').replace(/^_|_$/g, '');
+    const dateiname = `${projNrCompact}_${projNameClean}_Preview.xlsx`
+      .replace(/[^a-zA-Z0-9_\-\.äöüÄÖÜß]/g, '_')
+      .replace(/_+/g, '_');
 
     let downloadUrl = null;
     let excelBase64 = null;
@@ -1831,7 +1874,7 @@ export default async function handler(req, res) {
         terminBlocksCount: builderOptions.termin_blocks?.length || 0,
         laufzeitVon: builderOptions.laufzeitVon,
         laufzeitBis: builderOptions.laufzeitBis,
-        version: 'v12.4-phantom-headers-cleanup',
+        version: 'v12.5-multi-firma-termin-dateiname',
       },
     });
   } catch (err) {
@@ -1843,7 +1886,7 @@ export default async function handler(req, res) {
       error: err?.message || 'Unknown error',
       errorType: err?.name || 'Error',
       stack: err?.stack ? String(err.stack).split('\n').slice(0, 8) : null,
-      version: 'v12.4-phantom-headers-cleanup',
+      version: 'v12.5-multi-firma-termin-dateiname',
     });
   }
 }
