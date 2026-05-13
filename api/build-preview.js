@@ -523,6 +523,10 @@ function styleAnswerCell(cell, ant, isOffTarget) {
 //   - "GD1-GD3" (Bereich)
 function filterQuoteByGruppe(text, gruppeId, allGruppen) {
   if (!text) return '';
+  // v12.15.2: Normalisiere "GD 4", "GD  4" → "GD4" damit das Filter-Regex matched.
+  // Sonnet schreibt oft mit Leerzeichen ("GD 4"), unser Regex erwartet aber direkt
+  // anschließende Zahl. Whitespace zwischen Prefix und Zahl entfernen.
+  text = String(text).replace(/\b(GD|IDI|VGD|VDI)\s+(\d)/gi, '$1$2');
   const targetUpper = String(gruppeId || '').toUpperCase();
   // Prefix extrahieren (GD, IDI, VGD, VDI) + Nummer
   const targetMatch = targetUpper.match(/^(GD|IDI|VGD|VDI)(\d+)$/i);
@@ -2795,7 +2799,7 @@ export default async function handler(req, res) {
         terminBlocksCount: builderOptions.termin_blocks?.length || 0,
         laufzeitVon: builderOptions.laufzeitVon,
         laufzeitBis: builderOptions.laufzeitBis,
-        version: 'v12.15.1-quote-komma-fixes',
+        version: 'v12.15.2-gd-space-fix',
       },
     });
   } catch (err) {
@@ -2807,7 +2811,7 @@ export default async function handler(req, res) {
       error: err?.message || 'Unknown error',
       errorType: err?.name || 'Error',
       stack: err?.stack ? String(err.stack).split('\n').slice(0, 8) : null,
-      version: 'v12.15.1-quote-komma-fixes',
+      version: 'v12.15.2-gd-space-fix',
     });
   }
 }
