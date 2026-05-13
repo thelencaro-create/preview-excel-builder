@@ -517,28 +517,128 @@ function styleAnswerCell(cell, ant, isOffTarget) {
 // Beispiel: "50% Nutzer (GD1+3), 50% ehemalige Nutzer (GD2+4)" wird bei GD1
 // reduziert zu "50% Nutzer (GD1+3)".
 //
+// v12.20.1 (universal): zusätzlich Zielgruppen-Substring-Erkennung. Wenn ein
+// Satz die zielgruppe einer ANDEREN Gruppe nennt UND nicht die eigene, wird
+// er weggefiltert. So funktioniert Filtering ohne explizite Gruppen-IDs in
+// den Hinweisen — der Parser kann zielgruppenspezifische Hinweise als
+// einfachen Klartext schreiben (z.B. "got2b-Nutzer: ... / Nicht-Nutzer: ...").
+//
 // Erkennt verschiedene Schreibweisen:
 //   - "GD1, GD2, GD3" oder "GD1, 2, 3"
 //   - "GD1+3" oder "GD1+GD3" oder "GD1 und GD3"
 //   - "GD1-GD3" (Bereich)
+//   - "got2b-Nutzer:", "Active Buyers:" (Zielgruppen-Substring aus gruppe.zielgruppe)
 function filterQuoteByGruppe(text, gruppeId, allGruppen) {
   if (!text) return '';
   // v12.15.2: Normalisiere "GD 4", "GD  4" → "GD4" damit das Filter-Regex matched.
-  // Sonnet schreibt oft mit Leerzeichen ("GD 4"), unser Regex erwartet aber direkt
-  // anschließende Zahl. Whitespace zwischen Prefix und Zahl entfernen.
   text = String(text).replace(/\b(GD|IDI|VGD|VDI)\s+(\d)/gi, '$1$2');
   const targetUpper = String(gruppeId || '').toUpperCase();
-  // Prefix extrahieren (GD, IDI, VGD, VDI) + Nummer
   const targetMatch = targetUpper.match(/^(GD|IDI|VGD|VDI)(\d+)$/i);
-  if (!targetMatch) return text; // Fallback bei unbekannter Gruppen-ID
+
+  // v12.20.1: Zielgruppen-Map aus allGruppen aufbauen.
+  // Ignoriere generische Zielgruppen ("Allgemein", "Mix", leer) — die sind
+  // kein semantischer Filter.
+  function isGenericZG(zg) {
+    if (!zg) return true;
+    const z = String(zg).toLowerCase().trim();
+    if (!z) return true;
+    return /^(allgemein|mix|verschiedene|alle)\b/.test(z) || z.length < 4;
+  }
+  const ownGruppe = Array.isArray(allGruppen)
+    ? allGruppen.find(g => String(g.id || '').toUpperCase() === targetUpper)
+    : null;
+  const ownZG = (ownGruppe && !isGenericZG(ownGruppe.zielgruppe))
+    ? String(ownGruppe.zielgruppe).trim() : '';
+  const otherZGs = Array.isArray(allGruppen)
+    ? Array.from(new Set(
+        allGruppen
+          .filter(g => String(g.id || '').toUpperCase() !== targetUpper)
+          .map(g => String(g.zielgruppe || '').trim())
+          .filter(z => !isGenericZG(z) && z !== ownZG)
+      ))
+    : [];
+
+  // Substring-Match einer Zielgruppe in einem Satz — case-insensitive,
+  // normalisiert Trennzeichen (Hyphen, Slash, Space → gleichbehandelt).
+  // So matched "got2b-Nutzer" auch wenn Sonnet "got2b Nutzer" schreibt.
+  function normalizeForZG(s) {
+    return String(s || '').toLowerCase().replace(/[\s\-\/]+/g, ' ').trim();
+  }
+  function zgMatch(text, zg) {
+    if (!zg) return false;
+    const tNorm = normalizeForZG(text);
+    const zNorm = normalizeForZG(zg);
+    if (!zNorm) return false;
+    // 1) Voll-Match normalisiert (löst Schreibvarianten Hyphen↔Space)
+    if (tNorm.includes(zNorm)) return true;
+    // 2) Token-Fallback: einzelne markante Wörter (≥5 chars), die NICHT in
+    //    ownZG vorkommen — sonst False-Positive bei Subset-Beziehung.
+    const tokens = zNorm.split(' ').filter(t => t.length >= 5);
+    const ownNorm = normalizeForZG(ownZG);
+    for (const tok of tokens) {
+      if (ownNorm && ownNorm.includes(tok)) continue;
+      if (tNorm.includes(tok)) return true;
+    }
+    return false;
+  }
+
+  // Prüft ob ein Satz/Sub den Zielgruppen-Filter passiert.
+  // - Wenn fremde ZG erwähnt UND eigene NICHT erwähnt → false (raus)
+  // - Sonst → true (behalten)
+  function zgFilterPass(s) {
+    if (otherZGs.length === 0) return true; // kein Zielgruppen-Filter möglich
+    const ownMentioned = ownZG ? zgMatch(s, ownZG) : false;
+    const fremdMentioned = otherZGs.some(zg => zgMatch(s, zg));
+    if (fremdMentioned && !ownMentioned) return false;
+    return true;
+  }
+
+  // v12.21.2: Satz-Splitter, der Abkürzungen wie "mind.", "z.B.", "ca." nicht
+  // als Satzende behandelt. Splittet nur an .!?-Stellen, an denen NICHT direkt
+  // davor eine bekannte Abkürzung steht.
+  function splitSentences(text) {
+    const ABBREV = /\b(z\.\s*B|u\.\s*a|d\.\s*h|i\.\s*d\.\s*R|mind|bzw|etc|ca|inkl|exkl|usw|evtl|ggf|max|min|Nr|Tel|Mr|Mrs|Dr|St|vs|Co|GmbH|AG)\.?$/i;
+    const out = [];
+    let buf = '';
+    // Erst auf Newlines splitten — die sind eindeutige Trennungen
+    for (const line of String(text).split(/\n+/)) {
+      // Dann auf .!? + Whitespace, aber Abkürzungs-Lookback prüfen
+      const parts = line.split(/([.!?])\s+/);
+      let acc = '';
+      for (let i = 0; i < parts.length; i++) {
+        const p = parts[i];
+        if (p === '.' || p === '!' || p === '?') {
+          acc += p;
+          // Prüfen ob acc auf Abkürzung endet
+          if (ABBREV.test(acc)) {
+            acc += ' '; // Abkürzung — Satz geht weiter
+          } else {
+            const s = acc.trim();
+            if (s) out.push(s);
+            acc = '';
+          }
+        } else {
+          acc += p;
+        }
+      }
+      if (acc.trim()) out.push(acc.trim());
+    }
+    return out.filter(Boolean);
+  }
+
+  // Wenn keine Gruppen-ID-Match (z.B. bei konsolidierter "IDI"-Gruppe ohne Nummer),
+  // läuft die ID-basierte Filterung nicht — aber Zielgruppen-Filter trotzdem.
+  if (!targetMatch) {
+    if (otherZGs.length === 0) return text;
+    const sentences = splitSentences(text);
+    const kept = sentences.filter(s => zgFilterPass(s));
+    return kept.join(' ').replace(/\s+/g, ' ').trim();
+  }
   const targetPrefix = targetMatch[1].toUpperCase();
   const targetNum = parseInt(targetMatch[2], 10);
 
-  // In Sätze splitten
-  const sentences = String(text)
-    .split(/(?:\n|(?<=[.!?])\s+)/)
-    .map(s => s.trim())
-    .filter(Boolean);
+  // In Sätze splitten (v12.21.2: abkürzungs-aware)
+  const sentences = splitSentences(text);
 
   // Extrahiert ALLE Gruppen-Nummern aus einem Satz für den gegebenen Prefix.
   // Handhabt: "GD1, GD2", "GD1+3", "GD1, 2, 3", "GD2-4" (Bereich)
@@ -552,16 +652,11 @@ function filterQuoteByGruppe(text, gruppeId, allGruppen) {
       const baseNum = parseInt(m[1], 10);
       numbers.add(baseNum);
       // Schaue ob nach der Zahl direkt +/-/und/,/Zahl kommt (Kettung)
-      // z.B. "GD1+3" oder "GD1, 2, 3" oder "GD1-3"
       let pos = m.index + m[0].length;
-      // Folge-Pattern: optional Whitespace, dann +/-/,/und, dann optional Whitespace, dann Zahl
-      const follow = /^([\s]*(?:[+,\-]|UND)[\s]*(\d+))+/i;
       const rest = upper.substring(pos);
       const fm = rest.match(/^[\s]*([+,\-]|UND)[\s]*(\d+)(?:[\s]*(?:[+,\-]|UND)[\s]*(\d+))*/i);
       if (fm) {
-        // Alle Zahlen aus dem Follow-Stream extrahieren
         const nums = fm[0].match(/\d+/g) || [];
-        // Wenn "-" als Operator UND zwei Zahlen, dann Range
         if (fm[0].includes('-') && nums.length === 1) {
           const end = parseInt(nums[0], 10);
           for (let i = Math.min(baseNum, end); i <= Math.max(baseNum, end); i++) {
@@ -577,6 +672,10 @@ function filterQuoteByGruppe(text, gruppeId, allGruppen) {
 
   const keptLines = [];
   for (const s of sentences) {
+    // v12.20.1: Zielgruppen-Filter zuerst — wenn fremde ZG ohne eigene erwähnt,
+    // raus. Wenn passt, weiter zur ID-Logik.
+    if (!zgFilterPass(s)) continue;
+
     // Erst grobe Prüfung: hat dieser Satz ÜBERHAUPT Gruppen-Erwähnungen?
     const anyMention = /\b(GD|IDI|VGD|VDI)\d+\b/i.test(s);
     if (!anyMention) {
@@ -586,14 +685,12 @@ function filterQuoteByGruppe(text, gruppeId, allGruppen) {
 
     // v12.15: Wenn Satz an Komma/Semikolon getrennt mehrere Gruppen-spezifische
     // Sub-Klauseln hat, jede Sub-Klausel einzeln filtern.
-    // Aber: bei "GD1, GD2, GD3" (reine Aufzählung von Gruppen) NICHT splitten,
-    // sondern den ganzen Satz als Ganzes prüfen.
-    // Heuristik: splitten nur wenn nach dem Komma noch "echter Text" kommt
-    // (nicht nur eine Gruppen-Erwähnung).
     const subParts = splitOnCommaIfMultiGroup(s);
     if (subParts.length > 1) {
       const keptSubs = [];
       for (const sub of subParts) {
+        // v12.20.1: ZG-Filter auch auf Sub-Ebene
+        if (!zgFilterPass(sub)) continue;
         const subHasMention = /\b(GD|IDI|VGD|VDI)\d+\b/i.test(sub);
         if (!subHasMention) {
           keptSubs.push(sub);
@@ -606,7 +703,6 @@ function filterQuoteByGruppe(text, gruppeId, allGruppen) {
       }
       if (keptSubs.length > 0) {
         let joined = keptSubs.join(', ');
-        // Wenn Original mit Satzzeichen endete, anhängen wenn nicht da
         const lastChar = s.slice(-1);
         if (/[.!?]/.test(lastChar) && !/[.!?]$/.test(joined)) {
           joined += lastChar;
@@ -616,7 +712,7 @@ function filterQuoteByGruppe(text, gruppeId, allGruppen) {
       continue;
     }
 
-    // Sonst: ganzen Satz als Ganzes prüfen (für Aufzählungen wie "GD1, GD2, GD3 sind…")
+    // Sonst: ganzen Satz als Ganzes prüfen
     const nums = extractGroupNumbers(s, targetPrefix);
     if (nums.has(targetNum)) {
       keptLines.push(s);
@@ -1219,20 +1315,49 @@ function buildHeaderNote(frage, extras) {
 // fällt zurück auf frage.quotenkommentar. Match ist tolerant gegen Whitespace
 // und Case (damit "Active Buyers TikTok Shop" auch matched wenn der Parser
 // "active buyers tiktok shop" liefert).
+//
+// v12.21: NEU - universelles gilt_fuer-Konzept (PATCH 17 vereinfacht).
+//   frage.quotenkommentar kann jetzt auch ARRAY sein:
+//     [{ text: "...", gilt_fuer: ["GD1","GD2"] }, ...]
+//   - Eintraege ohne gilt_fuer (oder gilt_fuer=[]) gelten studienweit
+//   - gilt_fuer kann Gruppen-IDs (GD1, IDI, VDI) oder Zielgruppen-Namen enthalten
+//   - Match ist case/whitespace-tolerant
+//   - Mehrere passende Eintraege werden mit '\n' verbunden
+function matchesGruppe(giltFuer, gruppe) {
+  // Leer/undefined = studienweit = passt fuer alle Gruppen
+  if (!Array.isArray(giltFuer) || giltFuer.length === 0) return true;
+  const norm = (s) => String(s || '').toLowerCase().replace(/\s+/g, ' ').trim();
+  const gid = norm(gruppe && gruppe.id);
+  const gzg = norm(gruppe && gruppe.zielgruppe);
+  for (const entry of giltFuer) {
+    const e = norm(entry);
+    if (e && (e === gid || e === gzg)) return true;
+  }
+  return false;
+}
+
 function pickQuotenkommentarFuerGruppe(frage, gruppe) {
   if (!frage) return '';
+  // Fall 1: quotenkommentar ist ein ARRAY (v12.21 universelles gilt_fuer)
+  if (Array.isArray(frage.quotenkommentar)) {
+    return frage.quotenkommentar
+      .filter(entry => entry && matchesGruppe(entry.gilt_fuer || entry.gilt_fuer_gruppen, gruppe))
+      .map(entry => String(entry.text || '').trim())
+      .filter(Boolean)
+      .join('\n');
+  }
+  // Fall 2: quotenkommentar_pro_zielgruppe (v12.18 backward compat)
   const perZG = frage.quotenkommentar_pro_zielgruppe;
   const zielgruppe = (gruppe && gruppe.zielgruppe) ? String(gruppe.zielgruppe).trim() : '';
   if (perZG && typeof perZG === 'object' && zielgruppe) {
-    // 1. Exact match
     if (perZG[zielgruppe]) return String(perZG[zielgruppe]).trim();
-    // 2. Case/whitespace-tolerant
     const norm = (s) => String(s || '').toLowerCase().replace(/\s+/g, ' ').trim();
     const target = norm(zielgruppe);
     for (const key of Object.keys(perZG)) {
       if (norm(key) === target) return String(perZG[key]).trim();
     }
   }
+  // Fall 3: einfacher String (Default, studienweit)
   return String(frage.quotenkommentar || '').trim();
 }
 
@@ -2929,7 +3054,7 @@ export default async function handler(req, res) {
         terminBlocksCount: builderOptions.termin_blocks?.length || 0,
         laufzeitVon: builderOptions.laufzeitVon,
         laufzeitBis: builderOptions.laufzeitBis,
-        version: 'v12.20.0-gd-anforderungen-fallback',
+        version: 'v12.21.1-zielgruppen-filter-universal',
       },
     });
   } catch (err) {
@@ -2941,7 +3066,7 @@ export default async function handler(req, res) {
       error: err?.message || 'Unknown error',
       errorType: err?.name || 'Error',
       stack: err?.stack ? String(err.stack).split('\n').slice(0, 8) : null,
-      version: 'v12.20.0-gd-anforderungen-fallback',
+      version: 'v12.21.1-zielgruppen-filter-universal',
     });
   }
 }
