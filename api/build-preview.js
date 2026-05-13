@@ -2625,24 +2625,43 @@ export default async function handler(req, res) {
 
     const fragenArr = Array.isArray(fragen) ? fragen : [];
     const setting = (methode === 'VGD' || methode === 'VDI') ? 'online' : 'offline';
-    const cfg = SHEET_CONFIG[methode] || SHEET_CONFIG['GD'];
 
     const templateBuffer = Buffer.from(templateBase64, 'base64');
     const template = new ExcelJS.Workbook();
     await template.xlsx.load(templateBuffer);
-    const srcWs = template.getWorksheet(cfg.sheetName);
-    if (!srcWs) {
-      return res.status(400).json({
-        error: `Sheet '${cfg.sheetName}' not found`,
+
+    // v12.16: Template-Sheet wird PRO GRUPPE ausgewaehlt (Mixed GD+IDI Projekte).
+    // Frueher wurde global ein srcWs gewaehlt (basierend auf req.body.methode),
+    // sodass IDI-Gruppen in gemischten Projekten faelschlich das GD-Sheet bekamen.
+    // Jetzt: Cache pro Sheet-Name + Lookup ueber gruppe.methode.
+    const srcCache = new Map();
+    async function getSrcAndMerges(methodeForGruppe) {
+      const cfgFG = SHEET_CONFIG[methodeForGruppe] || SHEET_CONFIG['GD'];
+      const sheetName = cfgFG.sheetName;
+      if (srcCache.has(sheetName)) return srcCache.get(sheetName);
+      const ws = template.getWorksheet(sheetName);
+      if (!ws) {
+        const err = new Error(`Sheet '${sheetName}' nicht im Template (verfuegbar: ${template.worksheets.map(w => w.name).join(', ')})`);
+        err.statusCode = 400;
+        throw err;
+      }
+      const merges = await readMergesFromBuffer(templateBuffer, sheetName);
+      const entry = { srcWs: ws, preMerges: merges, cfgFG, sheetName };
+      srcCache.set(sheetName, entry);
+      return entry;
+    }
+
+    // Pre-Validate: das Default-Sheet (gemaess globalem methode) muss existieren,
+    // damit ein offensichtlich falsches Template frueh erkannt wird.
+    let defaultEntry;
+    try {
+      defaultEntry = await getSrcAndMerges(methode);
+    } catch (e) {
+      return res.status(e.statusCode || 400).json({
+        error: e.message,
         available: template.worksheets.map(w => w.name),
       });
     }
-
-    // v11.3: Merges aus rohem XLSX-Buffer parsen (umgeht ExcelJS-API-Quirks)
-    const preMerges = await readMergesFromBuffer(templateBuffer, cfg.sheetName);
-    // v11.6: preMerges auch fillSheet zugänglich machen, damit es die TN-Bereich-
-    // Merges (z.B. G7:H7) auf neue Zeilen 11+ replizieren kann.
-    builderOptions.preMerges = preMerges;
 
     const result = new ExcelJS.Workbook();
     result.creator = 'Preview Generator';
@@ -2667,12 +2686,14 @@ export default async function handler(req, res) {
       console.warn('Overview sheet failed (non-fatal):', e.message);
     }
 
-    const processGruppe = (gruppe, sheetName, fragenFG, includeIdiInfo) => {
-      const dstWs = result.addWorksheet(sheetName);
-      copyWorksheet(srcWs, dstWs, preMerges);
-
+    const processGruppe = async (gruppe, sheetName, fragenFG, includeIdiInfo) => {
       const methodeFG = gruppe.methode || methode;
-      const cfgFG = SHEET_CONFIG[methodeFG] || SHEET_CONFIG['GD'];
+      // v12.16: Template-Sheet PRO GRUPPE aus dem Cache holen (GD vs IDIs vs VGDs vs VDIs).
+      const { srcWs: srcWsFG, preMerges: preMergesFG, cfgFG } = await getSrcAndMerges(methodeFG);
+
+      const dstWs = result.addWorksheet(sheetName);
+      copyWorksheet(srcWsFG, dstWs, preMergesFG);
+
       const quoteStartCol = findQuoteStartCol(dstWs, cfgFG.quoteStartCol);
       const brutto = gruppe.brutto || 8;
       const tnEnd = TN_START + brutto - 1;
@@ -2685,21 +2706,24 @@ export default async function handler(req, res) {
 
       // v11: nur dem IDI/VDI-Sheet die IDI-Info-Blöcke geben
       // v11.4: termin_blocks ebenfalls nur bei IDI (bei GD pro Sheet 1 Termin im Header)
+      // v12.16: preMerges PRO GRUPPE in sheetOptions, damit fillSheet die korrekten
+      // Template-Merges fuer die TN-Bereich-Replikation hat.
+      const baseOpts = { ...builderOptions, preMerges: preMergesFG };
       const sheetOptions = includeIdiInfo
-        ? builderOptions
-        : { ...builderOptions, idiProfile: null, segment_beschreibungen: null,
+        ? baseOpts
+        : { ...baseOpts, idiProfile: null, segment_beschreibungen: null,
             studien_quoten: null, termin_blocks: null };
 
       fillSheet(
         dstWs, gruppe, fragenFG, projektnummer, projektname,
         auftraggeber, setting, methodeFG, quoteStartCol, gruppen, sheetOptions
       );
-      newSheetNames.push({ sheet: sheetName, quoteStartCol, brutto, tnEnd });
+      newSheetNames.push({ sheet: sheetName, methode: methodeFG, quoteStartCol, brutto, tnEnd });
     };
 
     if (isIDI) {
       const hauptGruppe = { ...gruppen[0], methode };
-      processGruppe(hauptGruppe, methode === 'VDI' ? 'VDIs' : 'IDIs', fragenArr, true);
+      await processGruppe(hauptGruppe, methode === 'VDI' ? 'VDIs' : 'IDIs', fragenArr, true);
     } else {
       // v12.7: Sortierung passiert schon oben vor Overview
       for (const gruppe of gruppen) {
@@ -2737,7 +2761,7 @@ export default async function handler(req, res) {
           // Sonst nur wenn explizit für diese Gruppe
           return f.relevantFuerGruppen.includes(gruppe.id);
         });
-        processGruppe(gruppe, sheetName, fragenFG, false);
+        await processGruppe(gruppe, sheetName, fragenFG, false);
       }
     }
 
@@ -2792,14 +2816,17 @@ export default async function handler(req, res) {
         segmentBeschreibungenCount: builderOptions.segment_beschreibungen
           ? Object.keys(builderOptions.segment_beschreibungen).length : 0,
         studienQuotenCount: builderOptions.studien_quoten?.length || 0,
-        // v11.3 NEU: Merges aus dem rohen Template-Buffer
-        preMergesCount: preMerges?.length || 0,
-        preMerges: preMerges || [],
+        // v12.16: preMerges PRO SHEET-TYP cachen (Mixed-Projekte). Default-Sheet
+        // war frueher die einzige Quelle; jetzt zeigen wir alle gecachten Sheets.
+        preMergesPerSheet: Array.from(srcCache.entries()).map(([name, entry]) => ({
+          sheet: name, count: entry.preMerges?.length || 0,
+        })),
+        preMergesDefault: defaultEntry?.preMerges || [],
         // v11.4 NEU: Termin-Blöcke + Laufzeit
         terminBlocksCount: builderOptions.termin_blocks?.length || 0,
         laufzeitVon: builderOptions.laufzeitVon,
         laufzeitBis: builderOptions.laufzeitBis,
-        version: 'v12.15.2-gd-space-fix',
+        version: 'v12.16.0-mixed-methode-fix',
       },
     });
   } catch (err) {
@@ -2811,7 +2838,7 @@ export default async function handler(req, res) {
       error: err?.message || 'Unknown error',
       errorType: err?.name || 'Error',
       stack: err?.stack ? String(err.stack).split('\n').slice(0, 8) : null,
-      version: 'v12.15.2-gd-space-fix',
+      version: 'v12.16.0-mixed-methode-fix',
     });
   }
 }
