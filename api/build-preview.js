@@ -507,6 +507,83 @@ function styleAnswerCell(cell, ant, isOffTarget) {
 // Bereinigt Quote-Texte von Code-Syntax (z.B. "(F8.item2.code IN [1,2]) OR ...")
 // und erzeugt lesbaren Klartext. Wenn der Text nach dem Bereinigen leer wäre,
 // fällt die Funktion auf einen generischen Hinweis zurück.
+// v12.14: Quote-Text pro Gruppe filtern
+// Wenn ein Quotenkommentar mehrere Gruppen-spezifische Zeilen enthält (z.B.
+// "GD1+3: hohes C Nutzer. GD2+4: Ehemalige. GD5+6: Mischung"),
+// behält diese Funktion nur die Zeilen, die für die aktuelle Gruppe gelten.
+// Zeilen ohne Gruppen-Erwähnung gelten als allgemein und bleiben drin.
+//
+// Erkennt verschiedene Schreibweisen:
+//   - "GD1, GD2, GD3" oder "GD1, 2, 3"
+//   - "GD1+3" oder "GD1+GD3" oder "GD1 und GD3"
+//   - "GD1-GD3" (Bereich)
+function filterQuoteByGruppe(text, gruppeId, allGruppen) {
+  if (!text) return '';
+  const targetUpper = String(gruppeId || '').toUpperCase();
+  // Prefix extrahieren (GD, IDI, VGD, VDI) + Nummer
+  const targetMatch = targetUpper.match(/^(GD|IDI|VGD|VDI)(\d+)$/i);
+  if (!targetMatch) return text; // Fallback bei unbekannter Gruppen-ID
+  const targetPrefix = targetMatch[1].toUpperCase();
+  const targetNum = parseInt(targetMatch[2], 10);
+
+  // In Sätze splitten
+  const sentences = String(text)
+    .split(/(?:\n|(?<=[.!?])\s+)/)
+    .map(s => s.trim())
+    .filter(Boolean);
+
+  // Extrahiert ALLE Gruppen-Nummern aus einem Satz für den gegebenen Prefix.
+  // Handhabt: "GD1, GD2", "GD1+3", "GD1, 2, 3", "GD2-4" (Bereich)
+  function extractGroupNumbers(sentence, prefix) {
+    const numbers = new Set();
+    const upper = sentence.toUpperCase();
+    // Schritt 1: Alle Vorkommen von PREFIX + Zahl als Anker finden
+    const re = new RegExp('\\b' + prefix + '(\\d+)', 'g');
+    let m;
+    while ((m = re.exec(upper)) !== null) {
+      const baseNum = parseInt(m[1], 10);
+      numbers.add(baseNum);
+      // Schaue ob nach der Zahl direkt +/-/und/,/Zahl kommt (Kettung)
+      // z.B. "GD1+3" oder "GD1, 2, 3" oder "GD1-3"
+      let pos = m.index + m[0].length;
+      // Folge-Pattern: optional Whitespace, dann +/-/,/und, dann optional Whitespace, dann Zahl
+      const follow = /^([\s]*(?:[+,\-]|UND)[\s]*(\d+))+/i;
+      const rest = upper.substring(pos);
+      const fm = rest.match(/^[\s]*([+,\-]|UND)[\s]*(\d+)(?:[\s]*(?:[+,\-]|UND)[\s]*(\d+))*/i);
+      if (fm) {
+        // Alle Zahlen aus dem Follow-Stream extrahieren
+        const nums = fm[0].match(/\d+/g) || [];
+        // Wenn "-" als Operator UND zwei Zahlen, dann Range
+        if (fm[0].includes('-') && nums.length === 1) {
+          const end = parseInt(nums[0], 10);
+          for (let i = Math.min(baseNum, end); i <= Math.max(baseNum, end); i++) {
+            numbers.add(i);
+          }
+        } else {
+          for (const n of nums) numbers.add(parseInt(n, 10));
+        }
+      }
+    }
+    return numbers;
+  }
+
+  const keptLines = [];
+  for (const s of sentences) {
+    // Erst grobe Prüfung: hat dieser Satz ÜBERHAUPT Gruppen-Erwähnungen?
+    const anyMention = /\b(GD|IDI|VGD|VDI)\d+\b/i.test(s);
+    if (!anyMention) {
+      keptLines.push(s);
+      continue;
+    }
+    const nums = extractGroupNumbers(s, targetPrefix);
+    if (nums.has(targetNum)) {
+      keptLines.push(s);
+    }
+    // Sonst: andere Gruppen erwähnt → Satz weglassen
+  }
+  return keptLines.join(' ').replace(/\s+/g, ' ').trim();
+}
+
 function cleanQuoteText(raw) {
   if (!raw) return '';
   let s = String(raw).trim();
@@ -814,7 +891,11 @@ function writeQuestionColumn(ws, col, label, note, antList, quoteText, tnEnd, gr
   }
   // Quote-Hinweis (grün) als letzte Zeile — auch wenn keine Antworten existieren
   // Text bereinigt von Code-Syntax + Sub-Quoten pro Antwort-Code (falls vorhanden)
-  const cleanedQuote = cleanQuoteText(quoteText);
+  let cleanedQuote = cleanQuoteText(quoteText);
+  // v12.14: Quote-Text pro Gruppe filtern - andere Gruppen-spezifische Anweisungen raus
+  if (cleanedQuote && gruppe && gruppe.id) {
+    cleanedQuote = filterQuoteByGruppe(cleanedQuote, gruppe.id, allGruppen);
+  }
   const subQuoteList = buildSubQuoteList(antList, frage, gruppe, allGruppen);
   // v12.11: Bedingungs-Hinweis bei 🔀-Fragen explizit als ERSTE Zeile, damit der
   // Recruiter sofort sieht WANN diese Frage gestellt wird
@@ -2556,11 +2637,38 @@ export default async function handler(req, res) {
       for (const gruppe of gruppen) {
         gruppe.methode = gruppe.methode || methode;
         const sheetName = gruppe.id.replace(/[:\\/\?\*\[\]]/g, '').substring(0, 31);
-        const fragenFG = fragenArr.filter(f =>
-          !f.relevantFuerGruppen ||
-          f.relevantFuerGruppen.includes('alle') ||
-          f.relevantFuerGruppen.includes(gruppe.id)
-        );
+        // v12.14: Frage-Filter pro Gruppe — relevantFuerGruppen als harter Filter (1C).
+        // Screenout-Fragen (Branchenausschluss, Alter unter 18 etc.) IMMER zeigen (2A),
+        // auch wenn relevantFuerGruppen sie ausschließt. Erkannt durch:
+        //   a) frage.antworten enthält mindestens eine Antwort mit screenout:true
+        //   b) frage.items hat mindestens ein Item mit nicht-leeren screenout_codes
+        // v12.14: Eine "klassische Screenout-Frage" (Branchenausschluss, Alter, etc.)
+        // hat MEHRERE Screenout-Antworten. Bedingte Fragen mit 1 Ja/1 Nein (Screenout)
+        // sind KEINE generellen Filter und folgen relevantFuerGruppen normal.
+        const isScreenoutFrage = (f) => {
+          // Antwort-Ebene: mind. 2 Screenouts ODER ≥50% der Antworten sind Screenout
+          if (Array.isArray(f.antworten) && f.antworten.length > 0) {
+            const screenoutCount = f.antworten.filter(a => a && a.screenout).length;
+            if (screenoutCount >= 2) return true;
+            // Edge-Case: 1 Screenout bei 2 Antworten (50/50) zählt NICHT als Filter
+            // — das wäre z.B. die typische Ja/Nein-Bedingungsfrage
+          }
+          // Item-Ebene: mind. 1 Item mit screenout_codes ist ein echter Filter
+          if (Array.isArray(f.items) && f.items.some(it =>
+            Array.isArray(it.screenout_codes) && it.screenout_codes.length > 0
+          )) return true;
+          return false;
+        };
+        const fragenFG = fragenArr.filter(f => {
+          // Screenout-Fragen IMMER drin
+          if (isScreenoutFrage(f)) return true;
+          // Ohne relevantFuerGruppen oder mit 'alle' -> immer drin
+          if (!f.relevantFuerGruppen) return true;
+          if (!Array.isArray(f.relevantFuerGruppen) || f.relevantFuerGruppen.length === 0) return true;
+          if (f.relevantFuerGruppen.includes('alle')) return true;
+          // Sonst nur wenn explizit für diese Gruppe
+          return f.relevantFuerGruppen.includes(gruppe.id);
+        });
         processGruppe(gruppe, sheetName, fragenFG, false);
       }
     }
@@ -2623,7 +2731,7 @@ export default async function handler(req, res) {
         terminBlocksCount: builderOptions.termin_blocks?.length || 0,
         laufzeitVon: builderOptions.laufzeitVon,
         laufzeitBis: builderOptions.laufzeitBis,
-        version: 'v12.13-cluster-hintergrund',
+        version: 'v12.14-gruppen-spezifisch',
       },
     });
   } catch (err) {
@@ -2635,7 +2743,7 @@ export default async function handler(req, res) {
       error: err?.message || 'Unknown error',
       errorType: err?.name || 'Error',
       stack: err?.stack ? String(err.stack).split('\n').slice(0, 8) : null,
-      version: 'v12.13-cluster-hintergrund',
+      version: 'v12.14-gruppen-spezifisch',
     });
   }
 }
