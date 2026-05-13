@@ -1214,6 +1214,28 @@ function buildHeaderNote(frage, extras) {
   return parts.join('\n\n').trim();
 }
 
+// v12.18: Wählt den passenden quotenkommentar für eine Gruppe.
+// Bevorzugt frage.quotenkommentar_pro_zielgruppe[gruppe.zielgruppe] (PATCH 17),
+// fällt zurück auf frage.quotenkommentar. Match ist tolerant gegen Whitespace
+// und Case (damit "Active Buyers TikTok Shop" auch matched wenn der Parser
+// "active buyers tiktok shop" liefert).
+function pickQuotenkommentarFuerGruppe(frage, gruppe) {
+  if (!frage) return '';
+  const perZG = frage.quotenkommentar_pro_zielgruppe;
+  const zielgruppe = (gruppe && gruppe.zielgruppe) ? String(gruppe.zielgruppe).trim() : '';
+  if (perZG && typeof perZG === 'object' && zielgruppe) {
+    // 1. Exact match
+    if (perZG[zielgruppe]) return String(perZG[zielgruppe]).trim();
+    // 2. Case/whitespace-tolerant
+    const norm = (s) => String(s || '').toLowerCase().replace(/\s+/g, ' ').trim();
+    const target = norm(zielgruppe);
+    for (const key of Object.keys(perZG)) {
+      if (norm(key) === target) return String(perZG[key]).trim();
+    }
+  }
+  return String(frage.quotenkommentar || '').trim();
+}
+
 // v12.3: Formatiert Segment-Quotenkommentare aus dem Parser als mehrzeilige
 // Liste mit aufgelösten Segment-Namen aus idiProfile.
 //
@@ -2375,7 +2397,8 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
     if (istEffektivMatrix && Array.isArray(frage.items) && frage.items.length) {
       // Matrix: pro Item eine Spalte + Mutter-Header in Zeile 5 gemerged
       // Quote-Text fällt zurück auf bedingung (Parser legt Quoten-Logik dort ab)
-      const matrixQuoteText = frage.quotenkommentar || frage.bedingung || '';
+      // v12.18: quotenkommentar_pro_zielgruppe vorrangig (PATCH 17)
+      const matrixQuoteText = pickQuotenkommentarFuerGruppe(frage, gruppe) || frage.bedingung || '';
       const matrixStart = currentCol;
       // Fallback-Antworten von Frage-Ebene (z.B. Skala 1=sehr gern...6=kenne ich nicht)
       // Bei Matrizen liegen Antworten oft auf Frage-Ebene, nicht pro Item dupliziert
@@ -2499,11 +2522,13 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
       // v11: Algorithmus-Eingabe-Skala (z.B. JPM Q12a) — 1 Sammelspalte
       const label = buildHeaderLabel(frage);
       const itemList = (frage.items || []).map(it => `• ${it.item_label || ''}`).join('\n');
+      // v12.18: quotenkommentar_pro_zielgruppe vorrangig (PATCH 17)
+      const tiQuotenkommentar = pickQuotenkommentarFuerGruppe(frage, gruppe);
       const note = `MUTTERFRAGE: ${frage.fragetext || ''}\n\n` +
                    `Algorithmus-Eingabe — Antworten in das externe Segmentierungs-Tool eingeben.\n\n` +
                    (itemList ? `Items:\n${itemList}\n\n` : '') +
-                   (frage.quotenkommentar || '');
-      const quoteText = frage.quotenkommentar
+                   (tiQuotenkommentar || '');
+      const quoteText = tiQuotenkommentar
         || 'Eingabe in Segmentierungs-Tool — Ergebnis: Segment';
       const tiQuoteFmt = formatSegmentQuotes(quoteText, opts.idiProfile);
       writeQuestionColumn(ws, currentCol, label + ' (Tool)', note,
@@ -2517,7 +2542,8 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
       // Fragen ausser Alter/Geschlecht (User-Wunsch). Vorher war hier nur die
       // Bedingung drin, sodass einfache Single-Choice-Fragen keine Notiz hatten.
       const note = buildHeaderNote(frage);
-      let quoteText = frage.quotenkommentar || frage.bedingung || '';
+      // v12.18: quotenkommentar_pro_zielgruppe vorrangig (PATCH 17)
+      let quoteText = pickQuotenkommentarFuerGruppe(frage, gruppe) || frage.bedingung || '';
       // Auto-Quote-Hinweis für F1 (Geschlecht) und F2 (Alter) aus Gruppen-Daten
       const ftLower = (frage.fragetext || '').toLowerCase();
       if (!quoteText && ftLower.includes('geschlecht') && gruppe.geschlecht && gruppe.geschlecht !== 'gemischt') {
@@ -2866,7 +2892,7 @@ export default async function handler(req, res) {
         terminBlocksCount: builderOptions.termin_blocks?.length || 0,
         laufzeitVon: builderOptions.laufzeitVon,
         laufzeitBis: builderOptions.laufzeitBis,
-        version: 'v12.17.0-fragetext-note',
+        version: 'v12.18.0-zielgruppen-quote',
       },
     });
   } catch (err) {
@@ -2878,7 +2904,7 @@ export default async function handler(req, res) {
       error: err?.message || 'Unknown error',
       errorType: err?.name || 'Error',
       stack: err?.stack ? String(err.stack).split('\n').slice(0, 8) : null,
-      version: 'v12.17.0-fragetext-note',
+      version: 'v12.18.0-zielgruppen-quote',
     });
   }
 }
