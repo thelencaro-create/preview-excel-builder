@@ -1180,6 +1180,40 @@ function buildHeaderLabel(frage) {
   return (lang || id).substring(0, 40);
 }
 
+// v12.17: Erkennt Alter-/Geschlecht-Fragen, damit bei diesen KEIN Fragetext
+// in die Excel-Notiz wandert (User-Wunsch: Fragetext-Notiz fuer ALLE ausser
+// Alter und Geschlecht). Matched bewusst tolerant via fragetext/kurz_label.
+function isAlterOrGeschlechtFrage(frage) {
+  if (!frage) return false;
+  const ft = String(frage.fragetext || '').toLowerCase();
+  const kl = String(frage.kurz_label || frage.kurzlabel || '').toLowerCase();
+  const both = ft + ' ' + kl;
+  if (/\bgeschlecht\b/.test(both)) return true;
+  // "alt sind", "wie alt", "Alter:" (auch Standalone-Label)
+  if (/\balt sind\b|\bwie alt\b|(^|[^a-zäöü])alter([^a-zäöü]|$)/.test(both)) return true;
+  return false;
+}
+
+// v12.17: Baut die Header-Notiz konsistent. Default: Fragetext + (optional)
+// Bedingung + (optional) extras. Bei Alter/Geschlecht entfaellt der Fragetext-
+// Anteil — nur Bedingung/extras werden uebernommen (meist leer = keine Notiz).
+function buildHeaderNote(frage, extras) {
+  const parts = [];
+  const ft = String((frage && frage.fragetext) || '').trim();
+  const kl = String((frage && (frage.kurz_label || frage.kurzlabel)) || '').trim();
+  if (!isAlterOrGeschlechtFrage(frage)) {
+    const text = ft || kl;
+    if (text) parts.push(text);
+  }
+  const bd = String((frage && frage.bedingung) || '').trim();
+  if (bd) parts.push(`Bedingung: ${bd}`);
+  if (extras) {
+    const ex = String(extras).trim();
+    if (ex) parts.push(ex);
+  }
+  return parts.join('\n\n').trim();
+}
+
 // v12.3: Formatiert Segment-Quotenkommentare aus dem Parser als mehrzeilige
 // Liste mit aufgelösten Segment-Namen aus idiProfile.
 //
@@ -2451,10 +2485,13 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
       mh.alignment = { horizontal: 'center', vertical: 'center', wrapText: true };
       mh.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: COLORS.MATRIX_HDR } };
       mh.border = borderWithThickRight(HEADER_BORDER);
-      if (matrixQuoteText) mh.note = matrixQuoteText;
+      // v12.17: Mutter-Header-Note enthaelt jetzt Fragetext + Quote (vorher nur Quote)
+      const mhNote = buildHeaderNote(frage, matrixQuoteText);
+      if (mhNote) mh.note = mhNote;
     } else if (frage.typ === 'freitext' || frage.typ === 'numerisch') {
       // Freitext / Numerisch: nur Header, keine Antwort-Codes
-      const note = frage.bedingung ? `Bedingung: ${frage.bedingung}` : (frage.fragetext || '');
+      // v12.17: Note via buildHeaderNote — Fragetext + Bedingung (ausser Alter/Geschlecht)
+      const note = buildHeaderNote(frage);
       const label = buildHeaderLabel(frage);
       writeQuestionColumn(ws, currentCol, label, note, null, null, tnEnd, gruppe, frage, true, allGruppen, uniformQuoteRow);
       currentCol++;
@@ -2476,7 +2513,10 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
     } else {
       // single_choice, multi_choice, ranking
       const label = buildHeaderLabel(frage);
-      const note = frage.bedingung ? `Bedingung: ${frage.bedingung}` : '';
+      // v12.17: Note via buildHeaderNote — Fragetext in Excel-Notiz fuer ALLE
+      // Fragen ausser Alter/Geschlecht (User-Wunsch). Vorher war hier nur die
+      // Bedingung drin, sodass einfache Single-Choice-Fragen keine Notiz hatten.
+      const note = buildHeaderNote(frage);
       let quoteText = frage.quotenkommentar || frage.bedingung || '';
       // Auto-Quote-Hinweis für F1 (Geschlecht) und F2 (Alter) aus Gruppen-Daten
       const ftLower = (frage.fragetext || '').toLowerCase();
@@ -2826,7 +2866,7 @@ export default async function handler(req, res) {
         terminBlocksCount: builderOptions.termin_blocks?.length || 0,
         laufzeitVon: builderOptions.laufzeitVon,
         laufzeitBis: builderOptions.laufzeitBis,
-        version: 'v12.16.0-mixed-methode-fix',
+        version: 'v12.17.0-fragetext-note',
       },
     });
   } catch (err) {
@@ -2838,7 +2878,7 @@ export default async function handler(req, res) {
       error: err?.message || 'Unknown error',
       errorType: err?.name || 'Error',
       stack: err?.stack ? String(err.stack).split('\n').slice(0, 8) : null,
-      version: 'v12.16.0-mixed-methode-fix',
+      version: 'v12.17.0-fragetext-note',
     });
   }
 }
