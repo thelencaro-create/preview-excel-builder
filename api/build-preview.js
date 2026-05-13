@@ -1778,14 +1778,46 @@ function buildOverviewSheet(workbook, gruppen, fragen, studienQuoten, idiProfile
         row++;
       }
     } else {
-      ws.mergeCells(`B${row}:D${row}`);
-      const empty = ws.getCell(`B${row}`);
-      empty.value = '(keine Gruppen-spezifischen Anforderungen — siehe globale Quoten oben)';
-      empty.font = { name: 'Calibri', size: 10, italic: true, color: { argb: 'FF808080' } };
-      empty.alignment = { horizontal: 'left', vertical: 'middle', indent: 1 };
-      ws.getRow(row).height = 20;
-      ws.getRow(row).outlineLevel = 1;
-      row++;
+      // v12.20: Statt nur einem Hinweis-Text — zeige die globalen Hinweise
+      // nochmal pro Gruppe als einklappbare Liste (outlineLevel=1). So sieht
+      // der Recruiter sie direkt im Gruppen-Block ohne nach oben scrollen zu
+      // müssen. Bei Bedarf zuklappen.
+      const globalHinweiseFallback = collectGlobalHinweise(fragen);
+      if (globalHinweiseFallback.length === 0) {
+        // Wirklich nichts da — der ursprüngliche Hinweis
+        ws.mergeCells(`B${row}:D${row}`);
+        const empty = ws.getCell(`B${row}`);
+        empty.value = '(keine Gruppen-spezifischen Anforderungen — siehe globale Quoten oben)';
+        empty.font = { name: 'Calibri', size: 10, italic: true, color: { argb: 'FF808080' } };
+        empty.alignment = { horizontal: 'left', vertical: 'middle', indent: 1 };
+        ws.getRow(row).height = 20;
+        ws.getRow(row).outlineLevel = 1;
+        row++;
+      } else {
+        ws.mergeCells(`B${row}:D${row}`);
+        const ah = ws.getCell(`B${row}`);
+        ah.value = '✅ HINWEISE FÜR DIESE GRUPPE (es gelten die globalen Hinweise)';
+        ah.font = { name: 'Calibri', size: 11, bold: true, color: { argb: 'FF548235' } };
+        ah.alignment = { horizontal: 'left', vertical: 'middle', indent: 1 };
+        ws.getRow(row).height = 22;
+        ws.getRow(row).outlineLevel = 1;
+        row++;
+
+        for (const h of globalHinweiseFallback) {
+          ws.getCell(`B${row}`).value = h.frageLabel;
+          ws.getCell(`B${row}`).font = { name: 'Calibri', size: 9, bold: true };
+          ws.getCell(`B${row}`).alignment = { horizontal: 'left', vertical: 'top', wrapText: true, indent: 1 };
+          ws.mergeCells(`C${row}:D${row}`);
+          const t = ws.getCell(`C${row}`);
+          t.value = h.text;
+          t.font = { name: 'Calibri', size: 9, italic: true };
+          t.alignment = { horizontal: 'left', vertical: 'top', wrapText: true, indent: 1 };
+          t.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFF9E6' } };
+          ws.getRow(row).height = Math.max(18, Math.min(60, Math.ceil(h.text.length / 80) * 14));
+          ws.getRow(row).outlineLevel = 1;
+          row++;
+        }
+      }
     }
 
     row += 2;
@@ -2897,7 +2929,7 @@ export default async function handler(req, res) {
         terminBlocksCount: builderOptions.termin_blocks?.length || 0,
         laufzeitVon: builderOptions.laufzeitVon,
         laufzeitBis: builderOptions.laufzeitBis,
-        version: 'v12.19.0-mixed-idi-gd-split',
+        version: 'v12.20.0-gd-anforderungen-fallback',
       },
     });
   } catch (err) {
@@ -2909,7 +2941,7 @@ export default async function handler(req, res) {
       error: err?.message || 'Unknown error',
       errorType: err?.name || 'Error',
       stack: err?.stack ? String(err.stack).split('\n').slice(0, 8) : null,
-      version: 'v12.19.0-mixed-idi-gd-split',
+      version: 'v12.20.0-gd-anforderungen-fallback',
     });
   }
 }
