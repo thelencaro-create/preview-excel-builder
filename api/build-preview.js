@@ -513,6 +513,10 @@ function styleAnswerCell(cell, ant, isOffTarget) {
 // behält diese Funktion nur die Zeilen, die für die aktuelle Gruppe gelten.
 // Zeilen ohne Gruppen-Erwähnung gelten als allgemein und bleiben drin.
 //
+// v12.15: Auch innerhalb eines Satzes wird Komma/Semikolon-getrennt gefiltert.
+// Beispiel: "50% Nutzer (GD1+3), 50% ehemalige Nutzer (GD2+4)" wird bei GD1
+// reduziert zu "50% Nutzer (GD1+3)".
+//
 // Erkennt verschiedene Schreibweisen:
 //   - "GD1, GD2, GD3" oder "GD1, 2, 3"
 //   - "GD1+3" oder "GD1+GD3" oder "GD1 und GD3"
@@ -575,13 +579,73 @@ function filterQuoteByGruppe(text, gruppeId, allGruppen) {
       keptLines.push(s);
       continue;
     }
+
+    // v12.15: Wenn Satz an Komma/Semikolon getrennt mehrere Gruppen-spezifische
+    // Sub-Klauseln hat, jede Sub-Klausel einzeln filtern.
+    // Aber: bei "GD1, GD2, GD3" (reine Aufzählung von Gruppen) NICHT splitten,
+    // sondern den ganzen Satz als Ganzes prüfen.
+    // Heuristik: splitten nur wenn nach dem Komma noch "echter Text" kommt
+    // (nicht nur eine Gruppen-Erwähnung).
+    const subParts = splitOnCommaIfMultiGroup(s);
+    if (subParts.length > 1) {
+      const keptSubs = [];
+      for (const sub of subParts) {
+        const subHasMention = /\b(GD|IDI|VGD|VDI)\d+\b/i.test(sub);
+        if (!subHasMention) {
+          keptSubs.push(sub);
+          continue;
+        }
+        const subNums = extractGroupNumbers(sub, targetPrefix);
+        if (subNums.has(targetNum)) {
+          keptSubs.push(sub);
+        }
+      }
+      if (keptSubs.length > 0) {
+        let joined = keptSubs.join(', ');
+        // Wenn Original mit Satzzeichen endete, anhängen wenn nicht da
+        const lastChar = s.slice(-1);
+        if (/[.!?]/.test(lastChar) && !/[.!?]$/.test(joined)) {
+          joined += lastChar;
+        }
+        keptLines.push(joined);
+      }
+      continue;
+    }
+
+    // Sonst: ganzen Satz als Ganzes prüfen (für Aufzählungen wie "GD1, GD2, GD3 sind…")
     const nums = extractGroupNumbers(s, targetPrefix);
     if (nums.has(targetNum)) {
       keptLines.push(s);
     }
-    // Sonst: andere Gruppen erwähnt → Satz weglassen
   }
   return keptLines.join(' ').replace(/\s+/g, ' ').trim();
+}
+
+// v12.15: Helper - splittet einen Satz an Komma/Semikolon nur wenn jede Teil
+// für sich genommen "echten Text" enthält (nicht nur Gruppen-IDs).
+// Damit wird "50% Nutzer (GD1+3), 50% ehemalige Nutzer (GD2+4)" in zwei Teile
+// gesplittet, aber "GD1, GD2 und GD3 sind familienorientiert" bleibt ein Teil.
+function splitOnCommaIfMultiGroup(s) {
+  // Erstmal an , oder ; splitten
+  const raw = s.split(/[,;]/).map(p => p.trim()).filter(Boolean);
+  if (raw.length <= 1) return [s];
+
+  // Jede Sub-Klausel muss mindestens 3 nicht-Gruppen-Wörter enthalten, sonst
+  // ist es eher eine Aufzählung ("GD1, GD2, GD3").
+  function nonGroupWordCount(t) {
+    // Entferne alle Gruppen-Erwähnungen und Zahlen
+    const stripped = t
+      .replace(/\b(GD|IDI|VGD|VDI)\d+(?:[\s]*[+,\-]\s*\d+)*\b/gi, '')
+      .replace(/[\(\)]/g, '')
+      .replace(/\d+%?/g, '')
+      .trim();
+    const words = stripped.split(/\s+/).filter(w => w.length >= 2);
+    return words.length;
+  }
+
+  const allHaveText = raw.every(p => nonGroupWordCount(p) >= 1);
+  if (!allHaveText) return [s];  // Aufzählung → nicht splitten
+  return raw;
 }
 
 function cleanQuoteText(raw) {
@@ -2731,7 +2795,7 @@ export default async function handler(req, res) {
         terminBlocksCount: builderOptions.termin_blocks?.length || 0,
         laufzeitVon: builderOptions.laufzeitVon,
         laufzeitBis: builderOptions.laufzeitBis,
-        version: 'v12.14-gruppen-spezifisch',
+        version: 'v12.15.1-quote-komma-fixes',
       },
     });
   } catch (err) {
@@ -2743,7 +2807,7 @@ export default async function handler(req, res) {
       error: err?.message || 'Unknown error',
       errorType: err?.name || 'Error',
       stack: err?.stack ? String(err.stack).split('\n').slice(0, 8) : null,
-      version: 'v12.14-gruppen-spezifisch',
+      version: 'v12.15.1-quote-komma-fixes',
     });
   }
 }
