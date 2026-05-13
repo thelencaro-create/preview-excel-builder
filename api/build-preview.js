@@ -2827,7 +2827,12 @@ export default async function handler(req, res) {
           // Sonst nur wenn explizit für diese Gruppe
           return f.relevantFuerGruppen.includes(gruppe.id);
         });
-        await processGruppe(gruppe, sheetName, fragenFG, false);
+        // v12.19: includeIdiInfo basiert auf gruppe.methode, damit eine
+        // konsolidierte IDI-Gruppe im Mixed-Pfad (GD-Sheets + 1 IDI-Sheet)
+        // ihre termin_blocks/idiProfile/segment_beschreibungen bekommt,
+        // während die GD-Sheets sie weiterhin NICHT bekommen.
+        const includeIdiInfoForThis = gruppe.methode === 'IDI' || gruppe.methode === 'VDI';
+        await processGruppe(gruppe, sheetName, fragenFG, includeIdiInfoForThis);
       }
     }
 
@@ -2892,7 +2897,7 @@ export default async function handler(req, res) {
         terminBlocksCount: builderOptions.termin_blocks?.length || 0,
         laufzeitVon: builderOptions.laufzeitVon,
         laufzeitBis: builderOptions.laufzeitBis,
-        version: 'v12.18.0-zielgruppen-quote',
+        version: 'v12.19.0-mixed-idi-gd-split',
       },
     });
   } catch (err) {
@@ -2904,7 +2909,7 @@ export default async function handler(req, res) {
       error: err?.message || 'Unknown error',
       errorType: err?.name || 'Error',
       stack: err?.stack ? String(err.stack).split('\n').slice(0, 8) : null,
-      version: 'v12.18.0-zielgruppen-quote',
+      version: 'v12.19.0-mixed-idi-gd-split',
     });
   }
 }
