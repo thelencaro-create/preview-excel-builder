@@ -338,6 +338,41 @@ function copyWorksheet(srcWs, dstWs, preMerges) {
       try { dstWs.dataValidations.add(sqref, { ...dv }); } catch (e) {}
     });
   }
+
+  // v12.21.3: Bilder (Logo der Vorlage) mitkopieren.
+  // ExcelJS exposed Worksheet-Images via getImages() ODER ws._media (intern).
+  // Wir nutzen getImages() und greifen das eigentliche ImageBuffer aus der
+  // Workbook-globalen Image-Map: srcWs.workbook.media[imageId].
+  try {
+    const imgs = (typeof srcWs.getImages === 'function') ? srcWs.getImages() : [];
+    if (imgs.length > 0 && dstWs.workbook) {
+      for (const imgRef of imgs) {
+        // imgRef = { imageId, range: { tl, br, editAs } }
+        // Wir brauchen aus srcWs.workbook.media den Eintrag mit derselben Reihenfolge
+        const srcWb = srcWs.workbook;
+        const mediaArr = srcWb.media || srcWb._media || [];
+        const idx = Number(imgRef.imageId);
+        const mediaEntry = mediaArr[idx];
+        if (!mediaEntry || !mediaEntry.buffer) continue;
+        // Bild im Ziel-Workbook neu registrieren und mit dem urspruenglichen
+        // Anchor an dstWs anhaengen
+        const newId = dstWs.workbook.addImage({
+          buffer: mediaEntry.buffer,
+          extension: mediaEntry.extension || 'png',
+        });
+        // Anchor 1:1 uebernehmen (TwoCellAnchor mit tl/br oder OneCellAnchor mit tl/ext)
+        const range = imgRef.range || {};
+        const anchor = {};
+        if (range.tl) anchor.tl = { ...range.tl };
+        if (range.br) anchor.br = { ...range.br };
+        if (range.ext) anchor.ext = { ...range.ext };
+        if (range.editAs) anchor.editAs = range.editAs;
+        dstWs.addImage(newId, anchor);
+      }
+    }
+  } catch (e) {
+    console.warn('Image copy failed (non-fatal):', e.message);
+  }
 }
 
 // Findet die erste "Quote"-Spalte in Zeile 6 dynamisch
@@ -3037,7 +3072,7 @@ export default async function handler(req, res) {
         terminBlocksCount: builderOptions.termin_blocks?.length || 0,
         laufzeitVon: builderOptions.laufzeitVon,
         laufzeitBis: builderOptions.laufzeitBis,
-        version: 'v12.21.2-template-trust-fix',
+        version: 'v12.21.3-template-images-copy',
       },
     });
   } catch (err) {
@@ -3049,7 +3084,7 @@ export default async function handler(req, res) {
       error: err?.message || 'Unknown error',
       errorType: err?.name || 'Error',
       stack: err?.stack ? String(err.stack).split('\n').slice(0, 8) : null,
-      version: 'v12.21.2-template-trust-fix',
+      version: 'v12.21.3-template-images-copy',
     });
   }
 }
