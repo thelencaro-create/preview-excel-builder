@@ -339,37 +339,11 @@ function copyWorksheet(srcWs, dstWs, preMerges) {
     });
   }
 
-  // v12.21.3/4: Bilder (Logo der Vorlage) mitkopieren.
-  // ExcelJS exposed Worksheet-Images via getImages(); die eigentlichen
-  // Image-Buffer liegen in workbook.media[imageId].
-  //
-  // WICHTIG (v12.21.4): Den 'range'-Block 1:1 durchreichen.
-  // Eine selektive Re-Konstruktion mit nur tl/br {col,row} verliert die
-  // nativeCol/nativeColOff/nativeRow/nativeRowOff-Pixel-Offsets, die
-  // Excel fuer die exakte Position+Groesse braucht. Ohne diese landet das
-  // Bild zwar an einer Cell, aber ohne mit-Skalierung der Zellen-Groesse
-  // (= falsches Verhalten beim Spalten/Zeilen-Resize).
-  try {
-    const imgs = (typeof srcWs.getImages === 'function') ? srcWs.getImages() : [];
-    if (imgs.length > 0 && dstWs.workbook) {
-      const srcWb = srcWs.workbook;
-      // ExcelJS exposes media via .model.media (kanonisch) oder .media / ._media
-      const mediaArr = srcWb.model?.media || srcWb.media || srcWb._media || [];
-      for (const imgRef of imgs) {
-        const idx = Number(imgRef.imageId);
-        const mediaEntry = mediaArr[idx];
-        if (!mediaEntry || !mediaEntry.buffer) continue;
-        const newId = dstWs.workbook.addImage({
-          buffer: mediaEntry.buffer,
-          extension: mediaEntry.extension || 'png',
-        });
-        // Range 1:1 durchreichen — enthaelt tl/br mit allen native* Properties
-        dstWs.addImage(newId, imgRef.range);
-      }
-    }
-  } catch (e) {
-    console.warn('Image copy failed (non-fatal):', e.message);
-  }
+  // v12.21.7: Bilder der Vorlage werden bewusst NICHT mitkopiert.
+  // Begruendung: Vorlagen-Logos sind als twoCellAnchor eingebettet und
+  // wuerden mit Spaltenbreiten-Aenderungen (z.B. lange IDI-Termine in
+  // Spalte G) mitwachsen. Stattdessen wird das Logo separat via addLogo()
+  // mit fester Pixelgroesse und editAs:'oneCell' eingefuegt.
 }
 
 // Findet die erste "Quote"-Spalte in Zeile 6 dynamisch
@@ -435,16 +409,29 @@ function addConditionalFormats(ws, tnEnd) {
   });
 }
 
-// v12.21.2: addLogo ist jetzt No-Op. Die neuen Vorlagen (offline+online für
-// F&T, m-s, H+G) haben das jeweilige Firmen-Logo bereits eingebettet, inkl.
-// korrekter Position und schwarzem Frame-Strich darunter. Eigenes Logo
-// einzufügen würde das Vorlagen-Logo doppeln und ggf. Borders zerstören.
+// v12.21.7: addLogo zurueck zur Original-Logik (vor unserer Session).
+// Der Builder fuegt sein eigenes Logo (aus logos.js) ein mit fester
+// Pixelgroesse und editAs:'oneCell' = "Move but don't size with cells".
+// Das ist robust gegen Spaltenbreiten-Aenderungen — egal wie breit die
+// IDI-Termin-Spalte wird, das Logo behaelt seine Groesse.
 //
-// Falls in Zukunft eine Vorlage ohne Logo verwendet werden soll, kann hier
-// wieder der alte Code aktiviert werden (siehe Git-History).
+// Das Logo der Vorlage selbst wird von copyWorksheet NICHT mitkopiert
+// (siehe dort), sonst haetten wir zwei Logos.
 function addLogo(dstWs, dstWorkbook, unternehmen, setting) {
-  // No-Op: Logo kommt aus der Vorlage
-  return;
+  const logo = LOGOS[unternehmen];
+  if (!logo?.base64 || logo.base64.startsWith('HIER_')) return;
+  try {
+    const logoId = dstWorkbook.addImage({ base64: logo.base64, extension: logo.ext });
+    // Offline: Spalten E-H (Index 4-7), Online: Spalten F-H (Index 5-7)
+    const startCol = (setting === 'online') ? 5 : 4;
+    dstWs.addImage(logoId, {
+      tl: { col: startCol, row: 0 },
+      ext: { width: logo.width || 200, height: logo.height || 60 },
+      editAs: 'oneCell',
+    });
+  } catch (e) {
+    console.error('Logo Fehler:', e.message);
+  }
 }
 
 // Findet dynamisch die "lfd. Nr."-Spalte im Template (Zeile 6).
@@ -3069,7 +3056,7 @@ export default async function handler(req, res) {
         terminBlocksCount: builderOptions.termin_blocks?.length || 0,
         laufzeitVon: builderOptions.laufzeitVon,
         laufzeitBis: builderOptions.laufzeitBis,
-        version: 'v12.21.4-image-anchor-passthrough',
+        version: 'v12.21.7-restore-original-logo',
       },
     });
   } catch (err) {
@@ -3081,7 +3068,7 @@ export default async function handler(req, res) {
       error: err?.message || 'Unknown error',
       errorType: err?.name || 'Error',
       stack: err?.stack ? String(err.stack).split('\n').slice(0, 8) : null,
-      version: 'v12.21.4-image-anchor-passthrough',
+      version: 'v12.21.7-restore-original-logo',
     });
   }
 }
