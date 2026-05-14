@@ -403,24 +403,16 @@ function addConditionalFormats(ws, tnEnd) {
   });
 }
 
-// Logo aus logos.js einfügen
-// WICHTIG: Position pro Setting unterschiedlich, weil offline und online Templates
-// das Logo in unterschiedlichen Spalten haben.
+// v12.21.2: addLogo ist jetzt No-Op. Die neuen Vorlagen (offline+online für
+// F&T, m-s, H+G) haben das jeweilige Firmen-Logo bereits eingebettet, inkl.
+// korrekter Position und schwarzem Frame-Strich darunter. Eigenes Logo
+// einzufügen würde das Vorlagen-Logo doppeln und ggf. Borders zerstören.
+//
+// Falls in Zukunft eine Vorlage ohne Logo verwendet werden soll, kann hier
+// wieder der alte Code aktiviert werden (siehe Git-History).
 function addLogo(dstWs, dstWorkbook, unternehmen, setting) {
-  const logo = LOGOS[unternehmen];
-  if (!logo?.base64 || logo.base64.startsWith('HIER_')) return;
-  try {
-    const logoId = dstWorkbook.addImage({ base64: logo.base64, extension: logo.ext });
-    // Offline: Spalten E-H (Index 4-7), Online: Spalten F-H (Index 5-7)
-    const startCol = (setting === 'online') ? 5 : 4;
-    dstWs.addImage(logoId, {
-      tl: { col: startCol, row: 0 },
-      ext: { width: logo.width || 200, height: logo.height || 60 },
-      editAs: 'oneCell',
-    });
-  } catch (e) {
-    console.error('Logo Fehler:', e.message);
-  }
+  // No-Op: Logo kommt aus der Vorlage
+  return;
 }
 
 // Findet dynamisch die "lfd. Nr."-Spalte im Template (Zeile 6).
@@ -2486,20 +2478,11 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
     }
   }
 
-  // v12.4: Phantom-Spalten links der quoteStartCol leeren
-  // (z.B. T6='TB', U6='PaySite' aus alten Template-Versionen, die nicht zu den
-  // offiziellen Tracking-Headern gehören). Konservativ: nur bekannte Phantom-Labels.
-  const PHANTOM_HEADERS = ['tb', 'paysite', 'pay site', 'pay-site', 'paysite '];
-  for (let col = 1; col < quoteStartCol; col++) {
-    for (const row of [MATRIX_HEADER_ROW, HEADER_ROW]) {
-      const c = ws.getCell(row, col);
-      if (!c.value) continue;
-      const v = String(c.value).toLowerCase().trim();
-      if (PHANTOM_HEADERS.includes(v)) {
-        c.value = null;
-      }
-    }
-  }
+  // v12.21.2: Phantom-Cleanup ENTFERNT.
+  // Frueher wurden T6='TB' und U6='PaySite' als veraltete Header-Reste
+  // geloescht. Seit dem Vorlagen-Refresh (14.05.2026) sind diese Labels
+  // offizieller Bestandteil der Vorlagen und muessen erhalten bleiben.
+  // (Quote-N-Reste in Header-Zeile werden weiterhin oben entfernt.)
 
   // 6) Fragen-Spalten aufbauen
   //
@@ -3054,7 +3037,7 @@ export default async function handler(req, res) {
         terminBlocksCount: builderOptions.termin_blocks?.length || 0,
         laufzeitVon: builderOptions.laufzeitVon,
         laufzeitBis: builderOptions.laufzeitBis,
-        version: 'v12.21.1-zielgruppen-filter-universal',
+        version: 'v12.21.2-template-trust-fix',
       },
     });
   } catch (err) {
@@ -3066,7 +3049,7 @@ export default async function handler(req, res) {
       error: err?.message || 'Unknown error',
       errorType: err?.name || 'Error',
       stack: err?.stack ? String(err.stack).split('\n').slice(0, 8) : null,
-      version: 'v12.21.1-zielgruppen-filter-universal',
+      version: 'v12.21.2-template-trust-fix',
     });
   }
 }
