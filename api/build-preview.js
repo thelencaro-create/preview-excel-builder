@@ -339,35 +339,32 @@ function copyWorksheet(srcWs, dstWs, preMerges) {
     });
   }
 
-  // v12.21.3: Bilder (Logo der Vorlage) mitkopieren.
-  // ExcelJS exposed Worksheet-Images via getImages() ODER ws._media (intern).
-  // Wir nutzen getImages() und greifen das eigentliche ImageBuffer aus der
-  // Workbook-globalen Image-Map: srcWs.workbook.media[imageId].
+  // v12.21.3/4: Bilder (Logo der Vorlage) mitkopieren.
+  // ExcelJS exposed Worksheet-Images via getImages(); die eigentlichen
+  // Image-Buffer liegen in workbook.media[imageId].
+  //
+  // WICHTIG (v12.21.4): Den 'range'-Block 1:1 durchreichen.
+  // Eine selektive Re-Konstruktion mit nur tl/br {col,row} verliert die
+  // nativeCol/nativeColOff/nativeRow/nativeRowOff-Pixel-Offsets, die
+  // Excel fuer die exakte Position+Groesse braucht. Ohne diese landet das
+  // Bild zwar an einer Cell, aber ohne mit-Skalierung der Zellen-Groesse
+  // (= falsches Verhalten beim Spalten/Zeilen-Resize).
   try {
     const imgs = (typeof srcWs.getImages === 'function') ? srcWs.getImages() : [];
     if (imgs.length > 0 && dstWs.workbook) {
+      const srcWb = srcWs.workbook;
+      // ExcelJS exposes media via .model.media (kanonisch) oder .media / ._media
+      const mediaArr = srcWb.model?.media || srcWb.media || srcWb._media || [];
       for (const imgRef of imgs) {
-        // imgRef = { imageId, range: { tl, br, editAs } }
-        // Wir brauchen aus srcWs.workbook.media den Eintrag mit derselben Reihenfolge
-        const srcWb = srcWs.workbook;
-        const mediaArr = srcWb.media || srcWb._media || [];
         const idx = Number(imgRef.imageId);
         const mediaEntry = mediaArr[idx];
         if (!mediaEntry || !mediaEntry.buffer) continue;
-        // Bild im Ziel-Workbook neu registrieren und mit dem urspruenglichen
-        // Anchor an dstWs anhaengen
         const newId = dstWs.workbook.addImage({
           buffer: mediaEntry.buffer,
           extension: mediaEntry.extension || 'png',
         });
-        // Anchor 1:1 uebernehmen (TwoCellAnchor mit tl/br oder OneCellAnchor mit tl/ext)
-        const range = imgRef.range || {};
-        const anchor = {};
-        if (range.tl) anchor.tl = { ...range.tl };
-        if (range.br) anchor.br = { ...range.br };
-        if (range.ext) anchor.ext = { ...range.ext };
-        if (range.editAs) anchor.editAs = range.editAs;
-        dstWs.addImage(newId, anchor);
+        // Range 1:1 durchreichen — enthaelt tl/br mit allen native* Properties
+        dstWs.addImage(newId, imgRef.range);
       }
     }
   } catch (e) {
@@ -3072,7 +3069,7 @@ export default async function handler(req, res) {
         terminBlocksCount: builderOptions.termin_blocks?.length || 0,
         laufzeitVon: builderOptions.laufzeitVon,
         laufzeitBis: builderOptions.laufzeitBis,
-        version: 'v12.21.3-template-images-copy',
+        version: 'v12.21.4-image-anchor-passthrough',
       },
     });
   } catch (err) {
@@ -3084,7 +3081,7 @@ export default async function handler(req, res) {
       error: err?.message || 'Unknown error',
       errorType: err?.name || 'Error',
       stack: err?.stack ? String(err.stack).split('\n').slice(0, 8) : null,
-      version: 'v12.21.3-template-images-copy',
+      version: 'v12.21.4-image-anchor-passthrough',
     });
   }
 }
