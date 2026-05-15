@@ -84,6 +84,15 @@
 //   Hintergrundfarbe aus der Vorlagen-Palette (HELLBLAU, HELLGRUEN, GELB,
 //   GRUEN, ORANGE). ROT/DUNKELROT werden NICHT genutzt (Screenout-Semantik).
 //   Recruiter sieht auf einen Blick die Quotengruppen-Verteilung.
+//
+// v12.22.5 (15.05.2026): VORLAGEN-LOGO ÜBERNEHMEN
+// - copyWorksheet kopiert jetzt die Bilder aus der Vorlage (statt zu überspringen).
+//   Das Logo erscheint in genau der Position und Größe, die in der Vorlage steht.
+// - editAs='oneCell' erzwungen → Logo wächst NICHT mit Spaltenbreiten-Änderungen
+//   (verhindert das alte Skalierungsproblem mit langen IDI-Terminen).
+// - addLogo() ist jetzt FALLBACK: greift nur wenn Vorlage kein Logo hat oder
+//   die Übernahme scheitert (z.B. ExcelJS-Quirks beim Image-Lesen).
+// - Marker dstWs._templateLogoCopied steuert den Fallback-Pfad.
 import ExcelJS from "exceljs";
 import { LOGOS } from './logos.js';
 import { createRequire } from 'module';
@@ -382,11 +391,54 @@ function copyWorksheet(srcWs, dstWs, preMerges) {
     });
   }
 
-  // v12.21.7: Bilder der Vorlage werden bewusst NICHT mitkopiert.
-  // Begruendung: Vorlagen-Logos sind als twoCellAnchor eingebettet und
-  // wuerden mit Spaltenbreiten-Aenderungen (z.B. lange IDI-Termine in
-  // Spalte G) mitwachsen. Stattdessen wird das Logo separat via addLogo()
-  // mit fester Pixelgroesse und editAs:'oneCell' eingefuegt.
+  // v12.22.5: Bilder der Vorlage werden jetzt übernommen (statt überspringen).
+  // Strategie:
+  //  - Aus Source-Workbook das Image als Buffer holen (model.media[].buffer)
+  //  - Im Destination-Workbook neu registrieren via addImage()
+  //  - Anker aus Source übernehmen (tl/br als Cell-Position), aber editAs='oneCell'
+  //    erzwingen → Logo wächst NICHT mit Spaltenbreiten (verhindert das alte
+  //    Logo-Skalierungsproblem mit langen IDI-Terminen)
+  //  - Wenn keine Vorlagen-Bilder vorhanden ODER Übernahme scheitert: addLogo()
+  //    setzt das Fallback-Logo mit festen Pixeln.
+  try {
+    const srcImages = (typeof srcWs.getImages === 'function') ? srcWs.getImages() : [];
+    const srcWb = srcWs.workbook;
+    let copiedCount = 0;
+    for (const img of srcImages) {
+      try {
+        // Image-Daten aus Source-Workbook holen
+        const mediaEntry = srcWb.model?.media?.[img.imageId];
+        if (!mediaEntry || !mediaEntry.buffer) continue;
+        const ext = mediaEntry.extension || 'png';
+        // Im Destination-Workbook neu registrieren
+        const newImageId = dstWs.workbook.addImage({
+          buffer: mediaEntry.buffer,
+          extension: ext,
+        });
+        // Anker aus Source übernehmen
+        // ExcelJS-Range hat: tl {col, row, nativeCol, nativeRow, ...}, br {...}
+        const anchor = {
+          tl: { col: img.range.tl.nativeCol, row: img.range.tl.nativeRow },
+          editAs: 'oneCell',
+        };
+        if (img.range.br) {
+          // twoCellAnchor: tl + br definieren Logo-Bereich
+          anchor.br = { col: img.range.br.nativeCol, row: img.range.br.nativeRow };
+        } else if (img.range.ext) {
+          // oneCellAnchor mit fester Größe (px)
+          anchor.ext = { width: img.range.ext.width, height: img.range.ext.height };
+        }
+        dstWs.addImage(newImageId, anchor);
+        copiedCount++;
+      } catch (e) {
+        console.warn(`[Logo] Vorlagen-Image-Übernahme fehlgeschlagen: ${e.message}`);
+      }
+    }
+    // Marker im Workbook, damit addLogo() das Fallback überspringen kann
+    dstWs._templateLogoCopied = copiedCount > 0;
+  } catch (e) {
+    console.warn(`[Logo] Image-Iteration fehlgeschlagen: ${e.message}`);
+  }
 }
 
 // Findet die erste "Quote"-Spalte in Zeile 6 dynamisch
@@ -823,7 +875,15 @@ function addConditionalFormats(ws, tnEnd) {
 //
 // Das Logo der Vorlage selbst wird von copyWorksheet NICHT mitkopiert
 // (siehe dort), sonst haetten wir zwei Logos.
+// v12.22.5: addLogo ist jetzt Fallback. Nur wenn copyWorksheet kein Vorlagen-
+// Logo übernommen hat (z.B. weil die Vorlage gar keines hat oder die Übernahme
+// fehlgeschlagen ist), wird ein eigenes Logo mit festen Pixelmaßen aus
+// LOGOS[unternehmen] eingefügt.
 function addLogo(dstWs, dstWorkbook, unternehmen, setting) {
+  // Wenn Vorlagen-Logo bereits übernommen wurde: nichts tun
+  if (dstWs._templateLogoCopied) {
+    return;
+  }
   const logo = LOGOS[unternehmen];
   if (!logo?.base64 || logo.base64.startsWith('HIER_')) return;
   try {
@@ -3516,7 +3576,7 @@ export default async function handler(req, res) {
         laufzeitBis: builderOptions.laufzeitBis,
         // v12.22.1: Quotengruppen-Debug pro Sheet
         qgDebug: globalThis.__QG_DEBUG__ || [],
-        version: 'v12.22.3-qg-styling',
+        version: 'v12.22.5-logo-from-template',
       },
     });
   } catch (err) {
@@ -3529,7 +3589,7 @@ export default async function handler(req, res) {
       errorType: err?.name || 'Error',
       stack: err?.stack ? String(err.stack).split('\n').slice(0, 8) : null,
       qgDebug: globalThis.__QG_DEBUG__ || [],
-      version: 'v12.22.3-qg-styling',
+      version: 'v12.22.5-logo-from-template',
     });
   }
 }
