@@ -41,6 +41,23 @@
 // - P6: idiProfile[] mit Segment, Cluster, profile_quoten (Schema)
 // - P7: segment_beschreibungen + studien_quoten in Spalte G ab Z+8 (Builder)
 // - P8: typ='tool_input' für Algorithmus-Skalen (1 Sammelspalte)
+//
+// v12.22.0 (15.05.2026): QUOTENGRUPPEN-LOGIK
+// - Neue Spalte F "Quotengruppe" in den Vorlagen (vom User händisch eingefügt)
+// - Builder erkennt die Spalte am Header-Text "Quotengruppe" in Z6
+// - Wenn ein Sheet >1 Quotengruppe enthält:
+//     * Dropdown (Data Validation) in Spalte F pro TN-Zeile
+//     * Quoten-Übersichts-Box ab quoteStartCol in Z1-Z4 (Label / Soll / Ist / Ampel)
+//     * COUNTIF-Formeln für Live-Soll-Ist-Abgleich
+// - Wenn ein Sheet =1 Quotengruppe enthält: Spalte F per hidden=true ausgeblendet
+// - Backward-Compat: Vorlagen ohne Spalte F (Header != "Quotengruppe") werden
+//   unverändert verarbeitet — keine QG-Features, alles wie v12.21.7
+// - Backward-Compat: Datenformat aus altem Schema (gruppe.zielgruppe als String,
+//   idiProfile[] als separate Liste) wird intern zu quotengruppen[] gemappt
+//   via buildQuotengruppenForSheet(). Neues Schema (gruppe.quotengruppen[]) hat
+//   Vorrang, Fallback ist Single-QG aus gruppe.zielgruppe.
+// - matchesGruppe() versteht hierarchische QG-IDs ("GD1.A", "IDI.S1") zusätzlich
+//   zu Gruppen-IDs und Zielgruppen-Namen.
 import ExcelJS from "exceljs";
 import { LOGOS } from './logos.js';
 import { createRequire } from 'module';
@@ -356,6 +373,324 @@ function findQuoteStartCol(ws, fallback) {
     if (/^Quote\b/i.test(v)) foundCol = colNum;
   });
   return foundCol || fallback;
+}
+
+// ---------------------------------------------------------------------------
+// 1c) QUOTENGRUPPEN-LOGIK (v12.22.0)
+// ---------------------------------------------------------------------------
+//
+// Eine Quotengruppe (QG) ist die kleinste Rekrutierungs-Einheit, für die eigene
+// Soll-Zahlen gelten. Jedes Sheet enthält 1..K Quotengruppen.
+//
+// Datenmodell pro QG:
+//   { id, label, n_target, demographics?, zuordnungs_regel?, segment?, cluster? }
+//
+// Schema-Quellen (in Prioritäts-Reihenfolge):
+//   1) gruppe.quotengruppen[]   — neues Schema (ab v12.22), direkt verwendet
+//   2) idiProfile[]             — bei konsolidiertem IDI/VDI-Sheet aus idiProfile
+//                                 ableiten (1 QG pro Segment-Profil)
+//   3) gruppe.zielgruppe        — Fallback: 1 QG, label = zielgruppe, n = brutto
+
+// Findet die Spalte mit Header "Quotengruppe" in Z6.
+// Rückgabe: Spalten-Nummer oder null wenn nicht vorhanden (alte Vorlage).
+function findQuotengruppenCol(ws) {
+  const row6 = ws.getRow(HEADER_ROW);
+  let foundCol = null;
+  row6.eachCell({ includeEmpty: false }, (cell, colNum) => {
+    if (foundCol !== null) return;
+    const v = String(cell.value ?? '').trim();
+    if (/^Quotengruppe$/i.test(v)) foundCol = colNum;
+  });
+  return foundCol;
+}
+
+// Baut die QG-Liste für ein Sheet aus den vorhandenen Daten.
+// Berücksichtigt das neue Schema (gruppe.quotengruppen) und Backward-Compat
+// (idiProfile bei konsolidierten IDI-Sheets, gruppe.zielgruppe als Single-QG).
+function buildQuotengruppenForSheet(gruppe, opts) {
+  const o = opts || {};
+  // 1) Neues Schema: gruppe.quotengruppen[] direkt verwenden
+  if (Array.isArray(gruppe.quotengruppen) && gruppe.quotengruppen.length > 0) {
+    return gruppe.quotengruppen.map((qg, i) => normalizeQG(qg, gruppe, i));
+  }
+  // 2) IDI/VDI mit idiProfile[] -> 1 QG pro eindeutigem Segment
+  const isIDI = gruppe.methode === 'IDI' || gruppe.methode === 'VDI';
+  if (isIDI && Array.isArray(o.idiProfile) && o.idiProfile.length > 0) {
+    // Unique Segments mit Anzahl
+    const segCount = new Map();
+    for (const p of o.idiProfile) {
+      const key = p.segment || 'Allgemein';
+      const cur = segCount.get(key) || { count: 0, sample: p };
+      cur.count++;
+      segCount.set(key, cur);
+    }
+    let i = 0;
+    const out = [];
+    for (const [segName, info] of segCount.entries()) {
+      const idSuffix = info.sample.segment_nr != null
+        ? `S${info.sample.segment_nr}`
+        : `S${i + 1}`;
+      out.push({
+        id: `${gruppe.id}.${idSuffix}`,
+        label: buildQGLabel({ segment: segName, ...info.sample.demographics }),
+        n_target: info.count,
+        demographics: {
+          alter_min: info.sample.alter_min ?? null,
+          alter_max: info.sample.alter_max ?? null,
+          geschlecht: info.sample.geschlecht ?? null,
+          standort:   gruppe.standort ?? null,
+        },
+        zuordnungs_regel: '',
+        segment: segName,
+        cluster: info.sample.cluster || null,
+        segment_nr: info.sample.segment_nr ?? null,
+      });
+      i++;
+    }
+    if (out.length > 0) return out;
+  }
+  // 3) Fallback: 1 QG aus gruppe.zielgruppe
+  return [{
+    id: `${gruppe.id}.A`,
+    label: buildQGLabel({
+      zielgruppe: gruppe.zielgruppe,
+      alter_min: gruppe.alter_min,
+      alter_max: gruppe.alter_max,
+      geschlecht: gruppe.geschlecht,
+    }),
+    n_target: gruppe.brutto || 8,
+    demographics: {
+      alter_min: gruppe.alter_min ?? null,
+      alter_max: gruppe.alter_max ?? null,
+      geschlecht: gruppe.geschlecht ?? null,
+      standort:   gruppe.standort ?? null,
+    },
+    zuordnungs_regel: gruppe.zuordnungs_kriterien || '',
+  }];
+}
+
+// Normalisiert einen QG-Eintrag aus dem neuen Schema (defensiv).
+function normalizeQG(qg, gruppe, idx) {
+  const id = qg.id || `${gruppe.id}.${String.fromCharCode(65 + idx)}`;
+  const label = qg.label || buildQGLabel(qg.demographics || qg) || id;
+  return {
+    id,
+    label,
+    n_target: parseInt(qg.n_target, 10) || 0,
+    demographics: qg.demographics || {
+      alter_min: qg.alter_min ?? null,
+      alter_max: qg.alter_max ?? null,
+      geschlecht: qg.geschlecht ?? null,
+      standort:   qg.standort ?? gruppe.standort ?? null,
+    },
+    zuordnungs_regel: qg.zuordnungs_regel || '',
+    segment: qg.segment || null,
+    cluster: qg.cluster || null,
+    segment_nr: qg.segment_nr ?? null,
+  };
+}
+
+// Baut ein lesbares Klartext-Label aus demographischen Attributen.
+// Format C (Konzept-Doku): "weiblich, Heavy User" / "männlich, 30-50, Heavy User"
+// Keine technischen Präfixe wie "QG-A". Wenn Segment vorhanden, das nutzen.
+function buildQGLabel(attrs) {
+  if (!attrs) return '';
+  const parts = [];
+  // Segment hat Vorrang
+  if (attrs.segment) {
+    parts.push(String(attrs.segment));
+  } else if (attrs.zielgruppe && attrs.zielgruppe !== 'Allgemein') {
+    parts.push(String(attrs.zielgruppe));
+  }
+  // Geschlecht
+  if (attrs.geschlecht && attrs.geschlecht !== 'gemischt') {
+    parts.push(String(attrs.geschlecht));
+  }
+  // Alter
+  if (attrs.alter_min || attrs.alter_max) {
+    const lo = attrs.alter_min;
+    const hi = attrs.alter_max;
+    if (lo && hi) parts.push(`${lo}-${hi}`);
+    else if (lo)  parts.push(`${lo}+`);
+    else if (hi)  parts.push(`bis ${hi}`);
+  }
+  // Dedupe und join
+  const seen = new Set();
+  return parts.filter(p => {
+    const k = p.toLowerCase();
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  }).join(', ') || 'Allgemein';
+}
+
+// Schreibt das Dropdown (Data Validation) und das Styling in die QG-Spalte
+// für jede TN-Zeile zwischen tnStart und tnEnd.
+// qgLabels ist die Liste aller QG-Labels dieses Sheets (für die Dropdown-Werte).
+function applyQuotengruppenDropdown(ws, qgCol, qgLabels, tnStart, tnEnd) {
+  if (!qgCol || !Array.isArray(qgLabels) || qgLabels.length === 0) return;
+  // Data Validation Liste: Excel erwartet "WERT1,WERT2,..." in Quotes.
+  // Kommas in Labels würden die Liste zerreißen — deshalb ersetzen wir Kommas
+  // in Labels durch "/", was im Konzept ohnehin als Trennzeichen vorgesehen ist.
+  // Maximale Listenlänge in Excel: 255 Zeichen für Inline-Listen.
+  const sanitizedLabels = qgLabels.map(l => String(l).replace(/,/g, ' /'));
+  const listStr = sanitizedLabels.join(',');
+  const inlineList = listStr.length <= 250
+    ? `"${listStr}"`
+    : null; // bei zu langer Liste: keine Validation, nur Styling
+
+  for (let r = tnStart; r <= tnEnd; r++) {
+    const cell = ws.getCell(r, qgCol);
+    if (inlineList) {
+      cell.dataValidation = {
+        type: 'list',
+        allowBlank: true,
+        formulae: [inlineList],
+        showErrorMessage: true,
+        errorStyle: 'warning',
+        errorTitle: 'Quotengruppe',
+        error: 'Bitte einen Eintrag aus der Liste wählen.',
+        showInputMessage: true,
+        promptTitle: 'Quotengruppe',
+        prompt: 'Welche Quotengruppe nach Screening?',
+      };
+    }
+    cell.alignment = { vertical: 'middle', horizontal: 'left', wrapText: true };
+    cell.font = { name: 'Arial', size: 9 };
+    cell.border = {
+      top:    { style: 'thin', color: { argb: 'FFCCCCCC' } },
+      bottom: { style: 'thin', color: { argb: 'FFCCCCCC' } },
+      left:   { style: 'thin', color: { argb: 'FFCCCCCC' } },
+      right:  { style: 'thin', color: { argb: 'FFCCCCCC' } },
+    };
+  }
+}
+
+// Schreibt die Quoten-Übersichts-Box in Z1..Z4 ab Spalte quoteStartCol.
+// Layout (4 Spalten breit):
+//   [Header-Zeile mit Spalten-Beschriftung] Quotengruppe | Soll | Ist | Status
+//   Die Daten-Zeilen liegen darunter (Z2..Z(1+N) bei N QGs).
+//
+// Wenn N > 4 (Box reicht über Z4 hinaus): wir lassen die Box wachsen, das
+// überlappt mit dem Matrix-Header (Z5) nicht — die Box steht in den ersten
+// 4 Zeilen oberhalb der Antwort-Codes.
+function renderQuotenUebersicht(ws, qgList, quoteStartCol, qgColLetter, tnStart, tnEnd) {
+  if (!Array.isArray(qgList) || qgList.length === 0 || !quoteStartCol) return;
+  const startCol = quoteStartCol;
+  // Z1: Header-Zeile
+  const h1 = ws.getCell(1, startCol);
+  h1.value = 'Quotengruppe';
+  h1.font = { name: 'Arial', size: 10, bold: true, color: { argb: 'FF1F4E79' } };
+  h1.alignment = { vertical: 'middle', horizontal: 'left', wrapText: true };
+
+  const h2 = ws.getCell(1, startCol + 1);
+  h2.value = 'Soll';
+  h2.font = { name: 'Arial', size: 10, bold: true, color: { argb: 'FF1F4E79' } };
+  h2.alignment = { vertical: 'middle', horizontal: 'center' };
+
+  const h3 = ws.getCell(1, startCol + 2);
+  h3.value = 'Ist';
+  h3.font = { name: 'Arial', size: 10, bold: true, color: { argb: 'FF1F4E79' } };
+  h3.alignment = { vertical: 'middle', horizontal: 'center' };
+
+  const h4 = ws.getCell(1, startCol + 3);
+  h4.value = '';
+  h4.font = { name: 'Arial', size: 10, bold: true };
+
+  // Hintergrund-Färbung für Box (helles Blau)
+  const fillBox = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFEAF1F8' } };
+  const thinGrey = { style: 'thin', color: { argb: 'FFB8C5D6' } };
+
+  for (let c = 0; c < 4; c++) {
+    const cell = ws.getCell(1, startCol + c);
+    cell.fill = fillBox;
+    cell.border = { top: thinGrey, bottom: thinGrey, left: thinGrey, right: thinGrey };
+  }
+
+  // Daten-Zeilen ab Z2
+  qgList.forEach((qg, idx) => {
+    const r = 2 + idx;
+    const labelCell = ws.getCell(r, startCol);
+    labelCell.value = qg.label;
+    labelCell.font = { name: 'Arial', size: 9 };
+    labelCell.alignment = { vertical: 'middle', horizontal: 'left', wrapText: true };
+
+    const sollCell = ws.getCell(r, startCol + 1);
+    sollCell.value = qg.n_target;
+    sollCell.font = { name: 'Arial', size: 9 };
+    sollCell.alignment = { vertical: 'middle', horizontal: 'center' };
+
+    // COUNTIF Formel auf die QG-Spalte F (qgColLetter) im TN-Bereich
+    const sanitizedLabel = String(qg.label).replace(/,/g, ' /').replace(/"/g, '""');
+    const istCell = ws.getCell(r, startCol + 2);
+    istCell.value = {
+      formula: `COUNTIF(${qgColLetter}${tnStart}:${qgColLetter}${tnEnd},"${sanitizedLabel}")`,
+    };
+    istCell.font = { name: 'Arial', size: 9 };
+    istCell.alignment = { vertical: 'middle', horizontal: 'center' };
+
+    const statusCell = ws.getCell(r, startCol + 3);
+    statusCell.value = '';  // wird per bedingter Formatierung gefärbt
+    statusCell.alignment = { vertical: 'middle', horizontal: 'center' };
+
+    // Border und Fill für Daten-Zeile
+    for (let c = 0; c < 4; c++) {
+      const cell = ws.getCell(r, startCol + c);
+      cell.border = { top: thinGrey, bottom: thinGrey, left: thinGrey, right: thinGrey };
+      if (c !== 3) cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFFFFF' } };
+    }
+  });
+
+  // Bedingte Formatierung für Status-Spalte (Ampel)
+  const lastDataRow = 1 + qgList.length;
+  const sollColLetter = columnNumberToLetter(startCol + 1);
+  const istColLetter  = columnNumberToLetter(startCol + 2);
+  const statusColLetter = columnNumberToLetter(startCol + 3);
+
+  // Grün wenn Ist = Soll
+  ws.addConditionalFormatting({
+    ref: `${statusColLetter}2:${statusColLetter}${lastDataRow}`,
+    rules: [
+      {
+        type: 'expression',
+        priority: 1,
+        formulae: [`$${istColLetter}2=$${sollColLetter}2`],
+        style: { fill: { type: 'pattern', pattern: 'solid', bgColor: { argb: 'FFA9D08E' } } },
+      },
+      // Rot wenn Ist > Soll
+      {
+        type: 'expression',
+        priority: 2,
+        formulae: [`$${istColLetter}2>$${sollColLetter}2`],
+        style: { fill: { type: 'pattern', pattern: 'solid', bgColor: { argb: 'FFFFC7CE' } } },
+      },
+      // Gelb wenn 0 < Ist < Soll
+      {
+        type: 'expression',
+        priority: 3,
+        formulae: [`AND($${istColLetter}2>0,$${istColLetter}2<$${sollColLetter}2)`],
+        style: { fill: { type: 'pattern', pattern: 'solid', bgColor: { argb: 'FFFFE699' } } },
+      },
+    ],
+  });
+
+  // Spaltenbreiten anpassen (nur erweitern, nicht verkleinern)
+  const colWidths = [32, 8, 8, 4];
+  for (let c = 0; c < 4; c++) {
+    const col = ws.getColumn(startCol + c);
+    if (!col.width || col.width < colWidths[c]) col.width = colWidths[c];
+  }
+}
+
+// Wandelt eine Spalten-Nummer (1-basiert) in den Buchstaben um (A, B, ..., AA).
+function columnNumberToLetter(n) {
+  let s = '';
+  while (n > 0) {
+    const rem = (n - 1) % 26;
+    s = String.fromCharCode(65 + rem) + s;
+    n = Math.floor((n - 1) / 26);
+  }
+  return s;
 }
 
 // Bedingte Formatierung Spalte A + B (sauber ohne Repair-Warnings)
@@ -1340,9 +1675,17 @@ function matchesGruppe(giltFuer, gruppe) {
   const norm = (s) => String(s || '').toLowerCase().replace(/\s+/g, ' ').trim();
   const gid = norm(gruppe && gruppe.id);
   const gzg = norm(gruppe && gruppe.zielgruppe);
+  // v12.22.0: QG-IDs (hierarchisch, z.B. "GD1.A", "IDI.S1") werden als
+  // Gruppen-Match interpretiert, wenn die Gruppen-ID dem Prefix entspricht.
+  // Beispiel: gilt_fuer=["GD1.A"] passt zu gruppe.id="GD1", weil der QG-Eintrag
+  // semantisch zu dieser Gruppe gehört (die Filterung pro QG passiert separat).
   for (const entry of giltFuer) {
     const e = norm(entry);
-    if (e && (e === gid || e === gzg)) return true;
+    if (!e) continue;
+    if (e === gid || e === gzg) return true;
+    // QG-ID-Match: entry hat Punkt-Notation, gruppen-Teil davor matched gid
+    const dotIdx = e.indexOf('.');
+    if (dotIdx > 0 && e.substring(0, dotIdx) === gid) return true;
   }
   return false;
 }
@@ -2014,6 +2357,27 @@ function buildOverviewSheet(workbook, gruppen, fragen, studienQuoten, idiProfile
       ws.getRow(row).height = Math.max(30, profilParts.length * 16);
       row++;
     }
+  }
+
+  // v12.22.0: Quotengruppen-Spalte und Übersichts-Box (wenn Vorlage Spalte F hat)
+  try {
+    const qgCol = findQuotengruppenCol(ws);
+    if (qgCol) {
+      const qgList = buildQuotengruppenForSheet(gruppe, opts);
+      const qgColLetter = columnNumberToLetter(qgCol);
+      if (qgList.length > 1) {
+        // Mehrere QGs → Dropdown + Übersichts-Box
+        const qgLabels = qgList.map(q => q.label);
+        applyQuotengruppenDropdown(ws, qgCol, qgLabels, TN_START, tnEnd);
+        renderQuotenUebersicht(ws, qgList, quoteStartCol, qgColLetter, TN_START, tnEnd);
+      } else {
+        // Nur 1 QG → Spalte F ausblenden, keine Box
+        ws.getColumn(qgCol).hidden = true;
+      }
+    }
+    // Wenn qgCol === null: alte Vorlage ohne Spalte F → nichts tun (Backward-Compat)
+  } catch (e) {
+    console.warn(`Quotengruppen-Layer für Sheet '${ws.name}' fehlgeschlagen (non-fatal):`, e.message);
   }
 
   return ws;
@@ -3056,7 +3420,7 @@ export default async function handler(req, res) {
         terminBlocksCount: builderOptions.termin_blocks?.length || 0,
         laufzeitVon: builderOptions.laufzeitVon,
         laufzeitBis: builderOptions.laufzeitBis,
-        version: 'v12.21.7-restore-original-logo',
+        version: 'v12.22.0-quotengruppen',
       },
     });
   } catch (err) {
@@ -3068,7 +3432,7 @@ export default async function handler(req, res) {
       error: err?.message || 'Unknown error',
       errorType: err?.name || 'Error',
       stack: err?.stack ? String(err.stack).split('\n').slice(0, 8) : null,
-      version: 'v12.21.7-restore-original-logo',
+      version: 'v12.22.0-quotengruppen',
     });
   }
 }
