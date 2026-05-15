@@ -66,6 +66,15 @@
 //   ist nicht immer zuverlässig)
 // - Debug-Info pro Sheet in Response-JSON unter debug.qgDebug — zeigt
 //   ob/wie QG-Spalte gefunden wurde, qgListLength, action
+//
+// v12.22.2 (15.05.2026): QG-BLOCK AN RICHTIGE STELLE
+// - Bug-Fix: in v12.22.0 wurde der QG-Block per str_replace versehentlich
+//   in buildOverviewSheet eingefügt (gleicher "return ws;"-Anker), nicht in
+//   fillSheet. Resultat: QG-Logik lief nur für das Quotenübersicht-Sheet
+//   (mit Fehler "gruppe is not defined"), nicht für die echten Gruppen-Sheets.
+// - Korrektur: QG-Block aus buildOverviewSheet entfernt, ans ECHTE Ende von
+//   fillSheet eingefügt (nach ws.views-Setzung). fillSheet hatte kein expli-
+//   zites "return ws;" — daher gab es keinen eindeutigen Anker.
 import ExcelJS from "exceljs";
 import { LOGOS } from './logos.js';
 import { createRequire } from 'module';
@@ -2379,49 +2388,6 @@ function buildOverviewSheet(workbook, gruppen, fragen, studienQuoten, idiProfile
     }
   }
 
-  // v12.22.0: Quotengruppen-Spalte und Übersichts-Box (wenn Vorlage Spalte F hat)
-  // v12.22.1: Debug-Logging + robusteres Hidden-Setzen
-  try {
-    const qgCol = findQuotengruppenCol(ws);
-    const dbg = {
-      sheet: ws.name,
-      qgCol: qgCol,
-      qgColLetter: qgCol ? columnNumberToLetter(qgCol) : null,
-      gruppeId: gruppe && gruppe.id,
-      hasIdiProfile: Array.isArray(opts.idiProfile) && opts.idiProfile.length > 0,
-      hasQuotengruppen: Array.isArray(gruppe.quotengruppen) && gruppe.quotengruppen.length > 0,
-    };
-    if (qgCol) {
-      const qgList = buildQuotengruppenForSheet(gruppe, opts);
-      const qgColLetter = columnNumberToLetter(qgCol);
-      dbg.qgListLength = qgList.length;
-      dbg.qgLabels = qgList.map(q => q.label);
-      if (qgList.length > 1) {
-        // Mehrere QGs → Dropdown + Übersichts-Box
-        const qgLabels = qgList.map(q => q.label);
-        applyQuotengruppenDropdown(ws, qgCol, qgLabels, TN_START, tnEnd);
-        renderQuotenUebersicht(ws, qgList, quoteStartCol, qgColLetter, TN_START, tnEnd);
-        dbg.action = 'rendered_dropdown_and_box';
-      } else {
-        // Nur 1 QG → Spalte F ausblenden (robust: width=0.1 + hidden=true)
-        const col = ws.getColumn(qgCol);
-        col.hidden = true;
-        col.width = 0.1;
-        dbg.action = 'hidden_single_qg';
-      }
-    } else {
-      dbg.action = 'no_qg_column_found';
-    }
-    // In globalen Debug-Sammler eintragen (wird im Response-JSON ausgegeben)
-    if (!globalThis.__QG_DEBUG__) globalThis.__QG_DEBUG__ = [];
-    globalThis.__QG_DEBUG__.push(dbg);
-    console.log(`[QG] ${ws.name}: ${JSON.stringify(dbg)}`);
-  } catch (e) {
-    console.warn(`[QG] ${ws.name} ERROR:`, e.message, e.stack);
-    if (!globalThis.__QG_DEBUG__) globalThis.__QG_DEBUG__ = [];
-    globalThis.__QG_DEBUG__.push({ sheet: ws.name, error: e.message });
-  }
-
   return ws;
 }
 
@@ -3204,6 +3170,48 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
 
   // Freeze Panes komplett deaktiviert — User scrollt frei in alle Richtungen
   ws.views = [{ state: 'normal' }];
+
+  // v12.22.2: Quotengruppen-Spalte und Übersichts-Box (wenn Vorlage Spalte F hat)
+  // Hier am ECHTEN Ende von fillSheet, NICHT in buildOverviewSheet (Bug v12.22.0/1).
+  try {
+    const qgCol = findQuotengruppenCol(ws);
+    const dbg = {
+      sheet: ws.name,
+      qgCol: qgCol,
+      qgColLetter: qgCol ? columnNumberToLetter(qgCol) : null,
+      gruppeId: gruppe && gruppe.id,
+      hasIdiProfile: Array.isArray(opts.idiProfile) && opts.idiProfile.length > 0,
+      hasQuotengruppen: Array.isArray(gruppe.quotengruppen) && gruppe.quotengruppen.length > 0,
+    };
+    if (qgCol) {
+      const qgList = buildQuotengruppenForSheet(gruppe, opts);
+      const qgColLetter = columnNumberToLetter(qgCol);
+      dbg.qgListLength = qgList.length;
+      dbg.qgLabels = qgList.map(q => q.label);
+      if (qgList.length > 1) {
+        // Mehrere QGs → Dropdown + Übersichts-Box
+        const qgLabels = qgList.map(q => q.label);
+        applyQuotengruppenDropdown(ws, qgCol, qgLabels, TN_START, tnEnd);
+        renderQuotenUebersicht(ws, qgList, quoteStartCol, qgColLetter, TN_START, tnEnd);
+        dbg.action = 'rendered_dropdown_and_box';
+      } else {
+        // Nur 1 QG → Spalte F ausblenden (robust: width=0.1 + hidden=true)
+        const col = ws.getColumn(qgCol);
+        col.hidden = true;
+        col.width = 0.1;
+        dbg.action = 'hidden_single_qg';
+      }
+    } else {
+      dbg.action = 'no_qg_column_found';
+    }
+    if (!globalThis.__QG_DEBUG__) globalThis.__QG_DEBUG__ = [];
+    globalThis.__QG_DEBUG__.push(dbg);
+    console.log(`[QG] ${ws.name}: ${JSON.stringify(dbg)}`);
+  } catch (e) {
+    console.warn(`[QG] ${ws.name} ERROR:`, e.message, e.stack);
+    if (!globalThis.__QG_DEBUG__) globalThis.__QG_DEBUG__ = [];
+    globalThis.__QG_DEBUG__.push({ sheet: ws.name, error: e.message });
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -3466,7 +3474,7 @@ export default async function handler(req, res) {
         laufzeitBis: builderOptions.laufzeitBis,
         // v12.22.1: Quotengruppen-Debug pro Sheet
         qgDebug: globalThis.__QG_DEBUG__ || [],
-        version: 'v12.22.1-quotengruppen-debug',
+        version: 'v12.22.2-quotengruppen-fix',
       },
     });
   } catch (err) {
@@ -3479,7 +3487,7 @@ export default async function handler(req, res) {
       errorType: err?.name || 'Error',
       stack: err?.stack ? String(err.stack).split('\n').slice(0, 8) : null,
       qgDebug: globalThis.__QG_DEBUG__ || [],
-      version: 'v12.22.1-quotengruppen-debug',
+      version: 'v12.22.2-quotengruppen-fix',
     });
   }
 }
