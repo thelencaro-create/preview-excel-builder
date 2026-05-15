@@ -75,6 +75,15 @@
 // - Korrektur: QG-Block aus buildOverviewSheet entfernt, ans ECHTE Ende von
 //   fillSheet eingefügt (nach ws.views-Setzung). fillSheet hatte kein expli-
 //   zites "return ws;" — daher gab es keinen eindeutigen Anker.
+//
+// v12.22.3 (15.05.2026): QG-DROPDOWN-STYLING
+// - Schriftgröße der QG-Zellen auf 10pt (war 9pt) — angeglichen an Nachbar-
+//   zellen wie "lfd. Nr." und "Datum".
+// - Horizontale Ausrichtung center (war left) — gleich wie Nachbarzellen.
+// - Bedingte Formatierung pro QG-Wert: jeder Eintrag bekommt eine eigene
+//   Hintergrundfarbe aus der Vorlagen-Palette (HELLBLAU, HELLGRUEN, GELB,
+//   GRUEN, ORANGE). ROT/DUNKELROT werden NICHT genutzt (Screenout-Semantik).
+//   Recruiter sieht auf einen Blick die Quotengruppen-Verteilung.
 import ExcelJS from "exceljs";
 import { LOGOS } from './logos.js';
 import { createRequire } from 'module';
@@ -553,9 +562,14 @@ function buildQGLabel(attrs) {
   }).join(', ') || 'Allgemein';
 }
 
-// Schreibt das Dropdown (Data Validation) und das Styling in die QG-Spalte
-// für jede TN-Zeile zwischen tnStart und tnEnd.
+// Schreibt das Dropdown (Data Validation), Styling und bedingte Formatierung
+// für die QG-Spalte zwischen tnStart und tnEnd.
 // qgLabels ist die Liste aller QG-Labels dieses Sheets (für die Dropdown-Werte).
+//
+// v12.22.3: Styling angeglichen an Nachbar-Zellen (Arial 10pt, center/center).
+// Bedingte Formatierung pro QG-Wert mit Farben aus der Vorlagen-Palette
+// (HELLBLAU, HELLGRUEN, GELB, GRUEN — die "freundlichen" Farben aus COLORS,
+// nicht ROT/DUNKELROT die Screenout-Bedeutung haben).
 function applyQuotengruppenDropdown(ws, qgCol, qgLabels, tnStart, tnEnd) {
   if (!qgCol || !Array.isArray(qgLabels) || qgLabels.length === 0) return;
   // Data Validation Liste: Excel erwartet "WERT1,WERT2,..." in Quotes.
@@ -566,7 +580,7 @@ function applyQuotengruppenDropdown(ws, qgCol, qgLabels, tnStart, tnEnd) {
   const listStr = sanitizedLabels.join(',');
   const inlineList = listStr.length <= 250
     ? `"${listStr}"`
-    : null; // bei zu langer Liste: keine Validation, nur Styling
+    : null;
 
   for (let r = tnStart; r <= tnEnd; r++) {
     const cell = ws.getCell(r, qgCol);
@@ -584,8 +598,9 @@ function applyQuotengruppenDropdown(ws, qgCol, qgLabels, tnStart, tnEnd) {
         prompt: 'Welche Quotengruppe nach Screening?',
       };
     }
-    cell.alignment = { vertical: 'middle', horizontal: 'left', wrapText: true };
-    cell.font = { name: 'Arial', size: 9 };
+    // v12.22.3: Styling angeglichen an Nachbar-Zellen (Arial 10pt, center/center)
+    cell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
+    cell.font = { name: 'Arial', size: 10 };
     cell.border = {
       top:    { style: 'thin', color: { argb: 'FFCCCCCC' } },
       bottom: { style: 'thin', color: { argb: 'FFCCCCCC' } },
@@ -593,6 +608,33 @@ function applyQuotengruppenDropdown(ws, qgCol, qgLabels, tnStart, tnEnd) {
       right:  { style: 'thin', color: { argb: 'FFCCCCCC' } },
     };
   }
+
+  // v12.22.3: Bedingte Formatierung pro QG-Wert.
+  // Farben aus der Vorlagen-Palette (COLORS), rotierend bei >4 QGs.
+  // Bewusst NICHT genutzt: ROT/DUNKELROT (Screenout-Semantik), GRAU (Inaktiv).
+  const QG_PALETTE = [
+    COLORS.HELLBLAU,   // 1. QG
+    COLORS.HELLGRUEN,  // 2. QG
+    COLORS.GELB,       // 3. QG
+    COLORS.GRUEN,      // 4. QG
+    COLORS.ORANGE,     // 5. QG (Fallback bei mehr als 4 — orange ist heller als rot)
+  ];
+  const qgColLetter = columnNumberToLetter(qgCol);
+  const range = `${qgColLetter}${tnStart}:${qgColLetter}${tnEnd}`;
+  const rules = sanitizedLabels.map((label, idx) => {
+    const color = QG_PALETTE[idx % QG_PALETTE.length];
+    // Excel-Formel: Doppelte Quotes für eingebettete Quotes im Label
+    const escapedLabel = String(label).replace(/"/g, '""');
+    return {
+      type: 'expression',
+      priority: idx + 1,
+      formulae: [`$${qgColLetter}${tnStart}="${escapedLabel}"`],
+      style: {
+        fill: { type: 'pattern', pattern: 'solid', bgColor: { argb: color } },
+      },
+    };
+  });
+  ws.addConditionalFormatting({ ref: range, rules });
 }
 
 // Schreibt die Quoten-Übersichts-Box in Z1..Z4 ab Spalte quoteStartCol.
@@ -3474,7 +3516,7 @@ export default async function handler(req, res) {
         laufzeitBis: builderOptions.laufzeitBis,
         // v12.22.1: Quotengruppen-Debug pro Sheet
         qgDebug: globalThis.__QG_DEBUG__ || [],
-        version: 'v12.22.2-quotengruppen-fix',
+        version: 'v12.22.3-qg-styling',
       },
     });
   } catch (err) {
@@ -3487,7 +3529,7 @@ export default async function handler(req, res) {
       errorType: err?.name || 'Error',
       stack: err?.stack ? String(err.stack).split('\n').slice(0, 8) : null,
       qgDebug: globalThis.__QG_DEBUG__ || [],
-      version: 'v12.22.2-quotengruppen-fix',
+      version: 'v12.22.3-qg-styling',
     });
   }
 }
