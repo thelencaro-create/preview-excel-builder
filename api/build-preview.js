@@ -58,6 +58,14 @@
 //   Vorrang, Fallback ist Single-QG aus gruppe.zielgruppe.
 // - matchesGruppe() versteht hierarchische QG-IDs ("GD1.A", "IDI.S1") zusätzlich
 //   zu Gruppen-IDs und Zielgruppen-Namen.
+//
+// v12.22.1 (15.05.2026): QG-DIAGNOSE-FIX
+// - findQuotengruppenCol robuster: nutzt cell.text als kanonische Wert-Quelle,
+//   Fallback cell.value (mit RichText-Unterstützung)
+// - Spalte ausblenden: zusätzlich width=0.1 setzen (ExcelJS-hidden allein
+//   ist nicht immer zuverlässig)
+// - Debug-Info pro Sheet in Response-JSON unter debug.qgDebug — zeigt
+//   ob/wie QG-Spalte gefunden wurde, qgListLength, action
 import ExcelJS from "exceljs";
 import { LOGOS } from './logos.js';
 import { createRequire } from 'module';
@@ -393,12 +401,24 @@ function findQuoteStartCol(ws, fallback) {
 
 // Findet die Spalte mit Header "Quotengruppe" in Z6.
 // Rückgabe: Spalten-Nummer oder null wenn nicht vorhanden (alte Vorlage).
+// v12.22.1: robuster gegen RichText/Formula-Werte — nutzt cell.text als Fallback
 function findQuotengruppenCol(ws) {
   const row6 = ws.getRow(HEADER_ROW);
   let foundCol = null;
   row6.eachCell({ includeEmpty: false }, (cell, colNum) => {
     if (foundCol !== null) return;
-    const v = String(cell.value ?? '').trim();
+    let v = '';
+    // 1) cell.text ist die kanonische Plain-Text-Repräsentation in ExcelJS
+    if (cell.text != null) v = String(cell.text);
+    // 2) Fallback: cell.value (kann String, Number, Object sein)
+    if (!v && cell.value != null) {
+      if (typeof cell.value === 'object' && Array.isArray(cell.value.richText)) {
+        v = cell.value.richText.map(r => r.text || '').join('');
+      } else {
+        v = String(cell.value);
+      }
+    }
+    v = v.trim();
     if (/^Quotengruppe$/i.test(v)) foundCol = colNum;
   });
   return foundCol;
@@ -2360,24 +2380,46 @@ function buildOverviewSheet(workbook, gruppen, fragen, studienQuoten, idiProfile
   }
 
   // v12.22.0: Quotengruppen-Spalte und Übersichts-Box (wenn Vorlage Spalte F hat)
+  // v12.22.1: Debug-Logging + robusteres Hidden-Setzen
   try {
     const qgCol = findQuotengruppenCol(ws);
+    const dbg = {
+      sheet: ws.name,
+      qgCol: qgCol,
+      qgColLetter: qgCol ? columnNumberToLetter(qgCol) : null,
+      gruppeId: gruppe && gruppe.id,
+      hasIdiProfile: Array.isArray(opts.idiProfile) && opts.idiProfile.length > 0,
+      hasQuotengruppen: Array.isArray(gruppe.quotengruppen) && gruppe.quotengruppen.length > 0,
+    };
     if (qgCol) {
       const qgList = buildQuotengruppenForSheet(gruppe, opts);
       const qgColLetter = columnNumberToLetter(qgCol);
+      dbg.qgListLength = qgList.length;
+      dbg.qgLabels = qgList.map(q => q.label);
       if (qgList.length > 1) {
         // Mehrere QGs → Dropdown + Übersichts-Box
         const qgLabels = qgList.map(q => q.label);
         applyQuotengruppenDropdown(ws, qgCol, qgLabels, TN_START, tnEnd);
         renderQuotenUebersicht(ws, qgList, quoteStartCol, qgColLetter, TN_START, tnEnd);
+        dbg.action = 'rendered_dropdown_and_box';
       } else {
-        // Nur 1 QG → Spalte F ausblenden, keine Box
-        ws.getColumn(qgCol).hidden = true;
+        // Nur 1 QG → Spalte F ausblenden (robust: width=0.1 + hidden=true)
+        const col = ws.getColumn(qgCol);
+        col.hidden = true;
+        col.width = 0.1;
+        dbg.action = 'hidden_single_qg';
       }
+    } else {
+      dbg.action = 'no_qg_column_found';
     }
-    // Wenn qgCol === null: alte Vorlage ohne Spalte F → nichts tun (Backward-Compat)
+    // In globalen Debug-Sammler eintragen (wird im Response-JSON ausgegeben)
+    if (!globalThis.__QG_DEBUG__) globalThis.__QG_DEBUG__ = [];
+    globalThis.__QG_DEBUG__.push(dbg);
+    console.log(`[QG] ${ws.name}: ${JSON.stringify(dbg)}`);
   } catch (e) {
-    console.warn(`Quotengruppen-Layer für Sheet '${ws.name}' fehlgeschlagen (non-fatal):`, e.message);
+    console.warn(`[QG] ${ws.name} ERROR:`, e.message, e.stack);
+    if (!globalThis.__QG_DEBUG__) globalThis.__QG_DEBUG__ = [];
+    globalThis.__QG_DEBUG__.push({ sheet: ws.name, error: e.message });
   }
 
   return ws;
@@ -3172,6 +3214,8 @@ export default async function handler(req, res) {
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' });
   }
+  // v12.22.1: QG-Debug pro Request frisch initialisieren
+  globalThis.__QG_DEBUG__ = [];
   try {
     const {
       templateBase64,
@@ -3420,7 +3464,9 @@ export default async function handler(req, res) {
         terminBlocksCount: builderOptions.termin_blocks?.length || 0,
         laufzeitVon: builderOptions.laufzeitVon,
         laufzeitBis: builderOptions.laufzeitBis,
-        version: 'v12.22.0-quotengruppen',
+        // v12.22.1: Quotengruppen-Debug pro Sheet
+        qgDebug: globalThis.__QG_DEBUG__ || [],
+        version: 'v12.22.1-quotengruppen-debug',
       },
     });
   } catch (err) {
@@ -3432,7 +3478,8 @@ export default async function handler(req, res) {
       error: err?.message || 'Unknown error',
       errorType: err?.name || 'Error',
       stack: err?.stack ? String(err.stack).split('\n').slice(0, 8) : null,
-      version: 'v12.22.0-quotengruppen',
+      qgDebug: globalThis.__QG_DEBUG__ || [],
+      version: 'v12.22.1-quotengruppen-debug',
     });
   }
 }
