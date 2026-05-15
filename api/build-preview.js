@@ -93,6 +93,18 @@
 // - addLogo() ist jetzt FALLBACK: greift nur wenn Vorlage kein Logo hat oder
 //   die Übernahme scheitert (z.B. ExcelJS-Quirks beim Image-Lesen).
 // - Marker dstWs._templateLogoCopied steuert den Fallback-Pfad.
+//
+// v12.22.6 (15.05.2026): LOGO PIXEL-GRÖSSE PINNEN
+// - Bug in v12.22.5: ExcelJS ignoriert editAs='oneCell' bei twoCellAnchor —
+//   das Logo verhält sich weiter wie in der Vorlage und skaliert mit den
+//   Output-Spaltenbreiten. Folge: Wenn QG-Spalte F auf width=0.1 ausgeblendet
+//   wird ODER IDI-Termin-Spalten verbreitert werden, wird das Logo verzerrt.
+// - Fix: Statt twoCellAnchor übernehmen wir die Source-Pixel-Größe einmalig
+//   (berechnet aus VORLAGEN-Spaltenbreiten) und schreiben sie als ext={w,h}
+//   in einen oneCellAnchor. Damit ist die Logo-Größe fix in Pixel, egal was
+//   im Output mit den Spalten passiert.
+// - computeImagePixelSize() rechnet Spaltenbreite (chars) → Pixel und
+//   Zeilenhöhe (pt) → Pixel mit Excel-Standardformeln.
 import ExcelJS from "exceljs";
 import { LOGOS } from './logos.js';
 import { createRequire } from 'module';
@@ -391,54 +403,87 @@ function copyWorksheet(srcWs, dstWs, preMerges) {
     });
   }
 
-  // v12.22.5: Bilder der Vorlage werden jetzt übernommen (statt überspringen).
-  // Strategie:
-  //  - Aus Source-Workbook das Image als Buffer holen (model.media[].buffer)
-  //  - Im Destination-Workbook neu registrieren via addImage()
-  //  - Anker aus Source übernehmen (tl/br als Cell-Position), aber editAs='oneCell'
-  //    erzwingen → Logo wächst NICHT mit Spaltenbreiten (verhindert das alte
-  //    Logo-Skalierungsproblem mit langen IDI-Terminen)
-  //  - Wenn keine Vorlagen-Bilder vorhanden ODER Übernahme scheitert: addLogo()
-  //    setzt das Fallback-Logo mit festen Pixeln.
+  // v12.22.6: Bilder der Vorlage werden übernommen, ABER als oneCellAnchor
+  // mit fester Pixelgröße — NICHT als twoCellAnchor.
+  // Grund: twoCellAnchor skaliert das Logo mit den Spaltenbreiten des
+  // Outputs. Wenn Builder die Spalten breiter macht (z.B. IDI-Termine in G)
+  // oder eine Spalte ausblendet (QG-Spalte F mit width=0.1), wird das Logo
+  // verzerrt/winzig dargestellt.
+  // Lösung: Pixelgröße einmalig aus der VORLAGEN-Spaltenbreite berechnen
+  // (das ist die "gemeinte" Größe) und dann fix in den Anker schreiben.
   try {
     const srcImages = (typeof srcWs.getImages === 'function') ? srcWs.getImages() : [];
     const srcWb = srcWs.workbook;
     let copiedCount = 0;
     for (const img of srcImages) {
       try {
-        // Image-Daten aus Source-Workbook holen
         const mediaEntry = srcWb.model?.media?.[img.imageId];
         if (!mediaEntry || !mediaEntry.buffer) continue;
         const ext = mediaEntry.extension || 'png';
-        // Im Destination-Workbook neu registrieren
         const newImageId = dstWs.workbook.addImage({
           buffer: mediaEntry.buffer,
           extension: ext,
         });
-        // Anker aus Source übernehmen
-        // ExcelJS-Range hat: tl {col, row, nativeCol, nativeRow, ...}, br {...}
-        const anchor = {
-          tl: { col: img.range.tl.nativeCol, row: img.range.tl.nativeRow },
-          editAs: 'oneCell',
+        // Anker zur Build-Zeit fest-pinnen:
+        const tl = {
+          col: img.range.tl.nativeCol,
+          row: img.range.tl.nativeRow,
         };
-        if (img.range.br) {
-          // twoCellAnchor: tl + br definieren Logo-Bereich
-          anchor.br = { col: img.range.br.nativeCol, row: img.range.br.nativeRow };
+        // Pixel-Größe ermitteln:
+        // Wenn Source twoCellAnchor war: aus Spalten- und Zeilengrößen der
+        // Source-Vorlage rechnen (Vorlagen-Originalmaße).
+        // Wenn Source bereits oneCellAnchor war: ext direkt nutzen.
+        let logoPx = null;
+        if (img.range.br && img.range.tl) {
+          // twoCellAnchor → Größe aus Source-Spaltenbreiten und Zeilenhöhen
+          logoPx = computeImagePixelSize(srcWs, img.range.tl, img.range.br);
         } else if (img.range.ext) {
-          // oneCellAnchor mit fester Größe (px)
-          anchor.ext = { width: img.range.ext.width, height: img.range.ext.height };
+          logoPx = {
+            width: img.range.ext.width,
+            height: img.range.ext.height,
+          };
         }
-        dstWs.addImage(newImageId, anchor);
+        if (!logoPx || logoPx.width <= 0 || logoPx.height <= 0) {
+          // Fallback: 320×75 (Querformat-Logos der drei Unternehmen)
+          logoPx = { width: 320, height: 75 };
+        }
+        dstWs.addImage(newImageId, {
+          tl,
+          ext: logoPx,
+          editAs: 'oneCell',
+        });
         copiedCount++;
       } catch (e) {
         console.warn(`[Logo] Vorlagen-Image-Übernahme fehlgeschlagen: ${e.message}`);
       }
     }
-    // Marker im Workbook, damit addLogo() das Fallback überspringen kann
     dstWs._templateLogoCopied = copiedCount > 0;
   } catch (e) {
     console.warn(`[Logo] Image-Iteration fehlgeschlagen: ${e.message}`);
   }
+}
+
+// Hilfsfunktion: berechnet die Pixel-Größe eines Logos zwischen tl und br
+// anhand der Spaltenbreiten und Zeilenhöhen der Source-Vorlage.
+// Excel-Maße:
+//   Spaltenbreite in "characters" → Pixel ≈ width * 7 + 5 (für Calibri 11pt)
+//   Zeilenhöhe in points → Pixel = height * 4/3
+function computeImagePixelSize(srcWs, tl, br) {
+  let widthPx = 0;
+  let heightPx = 0;
+  // Anteilig: tl.col ist 0-basiert, nativeColOff in EMU (1 px = 9525 EMU)
+  // Wir nehmen erst mal die ganzen Spalten/Zeilen, Offsets sind meist klein
+  for (let c = tl.nativeCol; c < br.nativeCol; c++) {
+    const col = srcWs.getColumn(c + 1);
+    const w = col?.width ?? 8.43;  // Excel-Default
+    widthPx += Math.round(w * 7 + 5);
+  }
+  for (let r = tl.nativeRow; r < br.nativeRow; r++) {
+    const row = srcWs.getRow(r + 1);
+    const h = row?.height ?? 15;  // Excel-Default in pt
+    heightPx += Math.round(h * 4 / 3);
+  }
+  return { width: widthPx, height: heightPx };
 }
 
 // Findet die erste "Quote"-Spalte in Zeile 6 dynamisch
@@ -3576,7 +3621,7 @@ export default async function handler(req, res) {
         laufzeitBis: builderOptions.laufzeitBis,
         // v12.22.1: Quotengruppen-Debug pro Sheet
         qgDebug: globalThis.__QG_DEBUG__ || [],
-        version: 'v12.22.5-logo-from-template',
+        version: 'v12.22.6-logo-pinned-onecell',
       },
     });
   } catch (err) {
@@ -3589,7 +3634,7 @@ export default async function handler(req, res) {
       errorType: err?.name || 'Error',
       stack: err?.stack ? String(err.stack).split('\n').slice(0, 8) : null,
       qgDebug: globalThis.__QG_DEBUG__ || [],
-      version: 'v12.22.5-logo-from-template',
+      version: 'v12.22.6-logo-pinned-onecell',
     });
   }
 }
