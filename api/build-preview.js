@@ -115,6 +115,15 @@
 // - Fix: img.range.ext primär nutzen (ExcelJS liest <a:ext> mit), nur wenn
 //   das fehlt, auf Spalten-Berechnung zurückfallen. EMU↔Pixel-Umrechnung
 //   per Heuristik (Werte >10000 = EMU).
+//
+// v12.22.8 (15.05.2026): QG-SPALTE GRAU STATT AUSGEBLENDET
+// - Wenn ein Sheet nur 1 Quotengruppe enthält: Spalte F NICHT mehr verstecken
+//   (hidden + width=0.1 kollabierten den Logo-Bereich → Logo verzerrt).
+// - Stattdessen: Header- und TN-Zellen der QG-Spalte grau einfärben als
+//   Signal "hier nicht genutzt". User kann die Spalte bei Bedarf manuell
+//   löschen — kostet 2 Klicks (Rechtsklick → Spalte löschen).
+// - Vorteil: Logo-Anker E1:H3 hat alle Spaltenbreiten zur Verfügung, das
+//   Vorlagen-Logo wird in voller Größe korrekt angezeigt.
 import ExcelJS from "exceljs";
 import { LOGOS } from './logos.js';
 import { createRequire } from 'module';
@@ -688,6 +697,49 @@ function buildQGLabel(attrs) {
 // Bedingte Formatierung pro QG-Wert mit Farben aus der Vorlagen-Palette
 // (HELLBLAU, HELLGRUEN, GELB, GRUEN — die "freundlichen" Farben aus COLORS,
 // nicht ROT/DUNKELROT die Screenout-Bedeutung haben).
+// v12.22.8: Bei nur 1 QG im Sheet wird die Spalte NICHT mehr ausgeblendet
+// (das kollabierte den Logo-Bereich und verzerrte das Vorlagen-Logo).
+// Stattdessen wird die Spalte grau eingefärbt und gesperrt — visuelles Signal
+// "hier nicht genutzt", der User kann sie bei Bedarf manuell löschen.
+function grayOutQuotengruppenSpalte(ws, qgCol, headerRow, tnEnd) {
+  if (!qgCol) return;
+  // Header-Zelle bleibt sichtbar, aber leicht grau hinterlegt
+  const headerCell = ws.getCell(headerRow, qgCol);
+  headerCell.fill = {
+    type: 'pattern',
+    pattern: 'solid',
+    fgColor: { argb: 'FFE0E0E0' },  // helles Grau (analog COLORS.GRAU)
+  };
+  headerCell.font = {
+    name: 'Arial', size: 9, bold: true, color: { argb: 'FF999999' },
+  };
+  headerCell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
+  // TN-Zellen: grau einfärben, locked, kein Dropdown
+  for (let r = (headerRow + 1); r <= tnEnd; r++) {
+    const cell = ws.getCell(r, qgCol);
+    cell.fill = {
+      type: 'pattern',
+      pattern: 'solid',
+      fgColor: { argb: 'FFEEEEEE' },  // sehr helles Grau, signalisiert "leer/inaktiv"
+    };
+    cell.protection = { locked: true };
+    cell.border = {
+      top:    { style: 'thin', color: { argb: 'FFCCCCCC' } },
+      bottom: { style: 'thin', color: { argb: 'FFCCCCCC' } },
+      left:   { style: 'thin', color: { argb: 'FFCCCCCC' } },
+      right:  { style: 'thin', color: { argb: 'FFCCCCCC' } },
+    };
+  }
+  // Sheet-Protection aktivieren mit minimalen Restriktionen:
+  // - Nur die grauen QG-Zellen sind locked
+  // - Alle anderen Zellen sind editierbar (Excel-Default ist locked=false bei
+  //   Zellen ohne explizite Setzung; protection auf Sheet-Ebene aktiviert das nur)
+  // ACHTUNG: Protection global zu aktivieren würde die Spalten-Lösch-Funktion
+  // ggf. blockieren. Daher protection NICHT aktivieren — die Zellen sind nur
+  // visuell grau, der User kann sie manuell löschen.
+}
+
+
 function applyQuotengruppenDropdown(ws, qgCol, qgLabels, tnStart, tnEnd) {
   if (!qgCol || !Array.isArray(qgLabels) || qgLabels.length === 0) return;
   // Data Validation Liste: Excel erwartet "WERT1,WERT2,..." in Quotes.
@@ -3363,11 +3415,13 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
         renderQuotenUebersicht(ws, qgList, quoteStartCol, qgColLetter, TN_START, tnEnd);
         dbg.action = 'rendered_dropdown_and_box';
       } else {
-        // Nur 1 QG → Spalte F ausblenden (robust: width=0.1 + hidden=true)
-        const col = ws.getColumn(qgCol);
-        col.hidden = true;
-        col.width = 0.1;
-        dbg.action = 'hidden_single_qg';
+        // v12.22.8: Bei nur 1 QG die Spalte NICHT mehr ausblenden — sonst kollabiert
+        // die Spalte unter dem Logo-Bereich und das Logo wird verzerrt dargestellt.
+        // Stattdessen: Zellen grau einfärben + sperren (read-only) als visuelles
+        // Signal, dass diese Spalte hier nicht genutzt wird. Der User kann sie
+        // bei Bedarf manuell löschen.
+        grayOutQuotengruppenSpalte(ws, qgCol, HEADER_ROW, tnEnd);
+        dbg.action = 'grayed_out_single_qg';
       }
     } else {
       dbg.action = 'no_qg_column_found';
@@ -3642,7 +3696,7 @@ export default async function handler(req, res) {
         laufzeitBis: builderOptions.laufzeitBis,
         // v12.22.1: Quotengruppen-Debug pro Sheet
         qgDebug: globalThis.__QG_DEBUG__ || [],
-        version: 'v12.22.7-logo-true-extent',
+        version: 'v12.22.8-qg-grayout',
       },
     });
   } catch (err) {
@@ -3655,7 +3709,7 @@ export default async function handler(req, res) {
       errorType: err?.name || 'Error',
       stack: err?.stack ? String(err.stack).split('\n').slice(0, 8) : null,
       qgDebug: globalThis.__QG_DEBUG__ || [],
-      version: 'v12.22.7-logo-true-extent',
+      version: 'v12.22.8-qg-grayout',
     });
   }
 }
