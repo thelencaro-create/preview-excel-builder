@@ -105,6 +105,16 @@
 //   im Output mit den Spalten passiert.
 // - computeImagePixelSize() rechnet Spaltenbreite (chars) → Pixel und
 //   Zeilenhöhe (pt) → Pixel mit Excel-Standardformeln.
+//
+// v12.22.7 (15.05.2026): LOGO ECHTE BILD-GRÖSSE NUTZEN
+// - Bug in v12.22.6: computeImagePixelSize summierte VORLAGEN-Spaltenbreiten,
+//   was ÜBERSCHÄTZT — die echte Bild-Anzeigegröße steht in <a:ext> innerhalb
+//   <xdr:spPr><a:xfrm> der DrawingML. Z.B. F&T-Logo: Vorlage hat E1:H3 als
+//   Anker, aber die echte <a:ext> ist 268×77 px (Logo-Original-Maße).
+//   v12.22.6 hat 287 px berechnet → Logo zu breit, überdeckte "F&T Standort".
+// - Fix: img.range.ext primär nutzen (ExcelJS liest <a:ext> mit), nur wenn
+//   das fehlt, auf Spalten-Berechnung zurückfallen. EMU↔Pixel-Umrechnung
+//   per Heuristik (Werte >10000 = EMU).
 import ExcelJS from "exceljs";
 import { LOGOS } from './logos.js';
 import { createRequire } from 'module';
@@ -430,22 +440,33 @@ function copyWorksheet(srcWs, dstWs, preMerges) {
           row: img.range.tl.nativeRow,
         };
         // Pixel-Größe ermitteln:
-        // Wenn Source twoCellAnchor war: aus Spalten- und Zeilengrößen der
-        // Source-Vorlage rechnen (Vorlagen-Originalmaße).
-        // Wenn Source bereits oneCellAnchor war: ext direkt nutzen.
+        // 1. PRIORITÄT: img.range.ext (= das tatsächliche Bild-Anzeigemaß aus
+        //    der Vorlage, sowohl bei oneCellAnchor als auch bei twoCellAnchor
+        //    in der <a:ext> XML-Struktur — ExcelJS liest das mit).
+        //    Excel-EMU: 1 px = 9525 EMU. ExcelJS gibt Werte teils in px,
+        //    teils in EMU zurück — wir erkennen das anhand der Größenordnung.
+        // 2. FALLBACK: aus Spalten- und Zeilengrößen der Source-Vorlage rechnen
+        //    (twoCellAnchor ohne <a:ext>).
         let logoPx = null;
-        if (img.range.br && img.range.tl) {
-          // twoCellAnchor → Größe aus Source-Spaltenbreiten und Zeilenhöhen
+        if (img.range.ext &&
+            typeof img.range.ext.width === 'number' &&
+            typeof img.range.ext.height === 'number' &&
+            img.range.ext.width > 0 && img.range.ext.height > 0) {
+          let w = img.range.ext.width;
+          let h = img.range.ext.height;
+          // Heuristik: wenn Werte > 10000, sind sie in EMU (1px = 9525 EMU)
+          if (w > 10000 || h > 10000) {
+            w = Math.round(w / 9525);
+            h = Math.round(h / 9525);
+          }
+          logoPx = { width: w, height: h };
+        } else if (img.range.br && img.range.tl) {
+          // Fallback: Größe aus Source-Spaltenbreiten und Zeilenhöhen
           logoPx = computeImagePixelSize(srcWs, img.range.tl, img.range.br);
-        } else if (img.range.ext) {
-          logoPx = {
-            width: img.range.ext.width,
-            height: img.range.ext.height,
-          };
         }
         if (!logoPx || logoPx.width <= 0 || logoPx.height <= 0) {
-          // Fallback: 320×75 (Querformat-Logos der drei Unternehmen)
-          logoPx = { width: 320, height: 75 };
+          // Letzter Fallback: 268×77 (typisches Querformat-Logo F&T)
+          logoPx = { width: 268, height: 77 };
         }
         dstWs.addImage(newImageId, {
           tl,
@@ -3621,7 +3642,7 @@ export default async function handler(req, res) {
         laufzeitBis: builderOptions.laufzeitBis,
         // v12.22.1: Quotengruppen-Debug pro Sheet
         qgDebug: globalThis.__QG_DEBUG__ || [],
-        version: 'v12.22.6-logo-pinned-onecell',
+        version: 'v12.22.7-logo-true-extent',
       },
     });
   } catch (err) {
@@ -3634,7 +3655,7 @@ export default async function handler(req, res) {
       errorType: err?.name || 'Error',
       stack: err?.stack ? String(err.stack).split('\n').slice(0, 8) : null,
       qgDebug: globalThis.__QG_DEBUG__ || [],
-      version: 'v12.22.6-logo-pinned-onecell',
+      version: 'v12.22.7-logo-true-extent',
     });
   }
 }
