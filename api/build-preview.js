@@ -116,21 +116,6 @@
 //   das fehlt, auf Spalten-Berechnung zurückfallen. EMU↔Pixel-Umrechnung
 //   per Heuristik (Werte >10000 = EMU).
 //
-// v12.22.9 (16.05.2026): GRUPPEN-DEDUP + DEFENSIVE addWorksheet
-// - Bug-Report: Builder crashte mit "Worksheet name already exists: GD3"
-//   wenn die Pipeline (Vision-Parser/Multi-Screener) doppelte Gruppen-IDs
-//   in gruppen[] lieferte. qgDebug zeigte 3 erfolgreiche fillSheets, aber
-//   der 4. Loop-Iterator versuchte denselben sheetName nochmal anzulegen.
-// - Fix A: vor dem processGruppe-Loop wird gruppen[] nach id dedupliziert.
-//   Doppelte Einträge werden geskippt + in qgDebug als _dedup_warning
-//   geloggt mit allen Original-IDs als Forensik-Hilfe.
-// - Fix B: result.addWorksheet(sheetName) ist jetzt in try/catch gewrappt;
-//   bei "already exists" wird _2, _3, ... als Suffix probiert (Belt-and-Braces,
-//   sollte nach Fix A nie greifen).
-// - Diagnose: Response-Body + Error-Response enthalten jetzt
-//   _inputGruppenIds (Roh-IDs) und _processedGruppenIds (nach Dedup),
-//   damit man sofort sieht, wer Duplikate liefert.
-//
 // v12.22.8 (15.05.2026): QG-SPALTE GRAU STATT AUSGEBLENDET
 // - Wenn ein Sheet nur 1 Quotengruppe enthält: Spalte F NICHT mehr verstecken
 //   (hidden + width=0.1 kollabierten den Logo-Bereich → Logo verzerrt).
@@ -3461,9 +3446,6 @@ export default async function handler(req, res) {
   }
   // v12.22.1: QG-Debug pro Request frisch initialisieren
   globalThis.__QG_DEBUG__ = [];
-  // v12.22.9: für Forensik in catch-Block erreichbar
-  let _inputGruppenIds = [];
-  let _droppedDuplicates = [];
   try {
     const {
       templateBase64,
@@ -3472,7 +3454,7 @@ export default async function handler(req, res) {
       kundenname,
       methode,
       isIDI,
-      gruppen: _rawGruppen,   // v12.22.9: vor dem Dedup
+      gruppen,
       fragen,
       compactMatrix,            // PATCH 1: optionaler Toggle aus dem Form
       compactMatrixThreshold,   // optional: Item-Schwellwert (Default 5)
@@ -3485,39 +3467,6 @@ export default async function handler(req, res) {
       laufzeitVon,
       laufzeitBis,
     } = req.body ?? {};
-
-    // v12.22.9: Gruppen-Dedup nach id — verhindert "Worksheet name already exists"
-    // wenn Pipeline (Vision-Parser / Multi-Screener-Append) Duplikate liefert.
-    _inputGruppenIds = Array.isArray(_rawGruppen)
-      ? _rawGruppen.map(g => (g && g.id) || '(no-id)')
-      : [];
-    const _seenGruppenIds = new Set();
-    _droppedDuplicates = [];
-    const gruppen = Array.isArray(_rawGruppen)
-      ? _rawGruppen.filter((g, idx) => {
-          const id = g && g.id;
-          if (!id) return true;  // ohne ID lass durch (kriegt unten Sheet-Name-Fallback)
-          if (_seenGruppenIds.has(id)) {
-            _droppedDuplicates.push({ index: idx, id, methode: g.methode, zielgruppe: g.zielgruppe });
-            return false;
-          }
-          _seenGruppenIds.add(id);
-          return true;
-        })
-      : [];
-    if (_droppedDuplicates.length > 0) {
-      console.warn(`[DEDUP v12.22.9] ${_droppedDuplicates.length} doppelte Gruppen-IDs entfernt:`,
-        JSON.stringify(_droppedDuplicates));
-      if (!globalThis.__QG_DEBUG__) globalThis.__QG_DEBUG__ = [];
-      globalThis.__QG_DEBUG__.push({
-        _meta: 'dedup_warning',
-        inputCount: _inputGruppenIds.length,
-        inputIds: _inputGruppenIds,
-        droppedDuplicates: _droppedDuplicates,
-        keptCount: gruppen.length,
-        keptIds: gruppen.map(g => (g && g.id) || '(no-id)'),
-      });
-    }
 
     const auftraggeber = kundenname || projektname || '';
     const builderOptions = {
@@ -3605,27 +3554,7 @@ export default async function handler(req, res) {
       // v12.16: Template-Sheet PRO GRUPPE aus dem Cache holen (GD vs IDIs vs VGDs vs VDIs).
       const { srcWs: srcWsFG, preMerges: preMergesFG, cfgFG } = await getSrcAndMerges(methodeFG);
 
-      // v12.22.9: Belt-and-Braces — falls trotz Dedup ein Sheet-Name-Konflikt
-      // entsteht (z.B. Excel-Sanitize macht zwei IDs gleich), Suffix anhängen.
-      let effectiveSheetName = sheetName;
-      let dstWs = null;
-      for (let suffix = 0; suffix < 10; suffix++) {
-        const tryName = suffix === 0 ? effectiveSheetName : `${effectiveSheetName.substring(0, 28)}_${suffix + 1}`;
-        try {
-          dstWs = result.addWorksheet(tryName);
-          if (suffix > 0) {
-            console.warn(`[DEDUP v12.22.9] Sheet-Name-Konflikt: '${sheetName}' bereits vergeben, benutze '${tryName}'`);
-            if (!globalThis.__QG_DEBUG__) globalThis.__QG_DEBUG__ = [];
-            globalThis.__QG_DEBUG__.push({ _meta: 'sheet_suffix_used', original: sheetName, used: tryName });
-          }
-          effectiveSheetName = tryName;
-          break;
-        } catch (e) {
-          if (!/already exists/i.test(e.message)) throw e;
-        }
-      }
-      if (!dstWs) throw new Error(`Konnte keinen freien Sheet-Namen für '${sheetName}' finden (10 Suffixe probiert)`);
-
+      const dstWs = result.addWorksheet(sheetName);
       copyWorksheet(srcWsFG, dstWs, preMergesFG);
 
       const quoteStartCol = findQuoteStartCol(dstWs, cfgFG.quoteStartCol);
@@ -3652,7 +3581,7 @@ export default async function handler(req, res) {
         dstWs, gruppe, fragenFG, projektnummer, projektname,
         auftraggeber, setting, methodeFG, quoteStartCol, gruppen, sheetOptions
       );
-      newSheetNames.push({ sheet: effectiveSheetName, methode: methodeFG, quoteStartCol, brutto, tnEnd });
+      newSheetNames.push({ sheet: sheetName, methode: methodeFG, quoteStartCol, brutto, tnEnd });
     };
 
     if (isIDI) {
@@ -3767,11 +3696,7 @@ export default async function handler(req, res) {
         laufzeitBis: builderOptions.laufzeitBis,
         // v12.22.1: Quotengruppen-Debug pro Sheet
         qgDebug: globalThis.__QG_DEBUG__ || [],
-        // v12.22.9: Forensik bei Gruppen-Duplikaten (immer im Output, auch ohne Dedup)
-        _inputGruppenIds: _inputGruppenIds,
-        _processedGruppenIds: gruppen.map(g => (g && g.id) || '(no-id)'),
-        _dedupDroppedCount: _droppedDuplicates.length,
-        version: 'v12.22.9-dedup',
+        version: 'v12.22.8-qg-grayout',
       },
     });
   } catch (err) {
@@ -3784,10 +3709,7 @@ export default async function handler(req, res) {
       errorType: err?.name || 'Error',
       stack: err?.stack ? String(err.stack).split('\n').slice(0, 8) : null,
       qgDebug: globalThis.__QG_DEBUG__ || [],
-      // v12.22.9: Forensik auch bei 500er
-      _inputGruppenIds: _inputGruppenIds,
-      _dedupDroppedCount: _droppedDuplicates.length,
-      version: 'v12.22.9-dedup',
+      version: 'v12.22.8-qg-grayout',
     });
   }
 }
