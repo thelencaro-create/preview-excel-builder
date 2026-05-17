@@ -116,15 +116,21 @@
 //   das fehlt, auf Spalten-Berechnung zurückfallen. EMU↔Pixel-Umrechnung
 //   per Heuristik (Werte >10000 = EMU).
 //
-// v12.22.10 (17.05.2026): AUTO-EXTRACT QUOTENGRUPPEN AUS FREITEXT
-// - Problem: Parser ignoriert PATCH 22 + Extract-Regel (v12.14.2) bei VELOXX
+// v12.22.10 (17.05.2026): AUTO-EXTRACT QUOTENGRUPPEN AUS FREITEXT + DV-FIX
+// - Problem A: Parser ignoriert PATCH 22 + Extract-Regel (v12.14.2) bei VELOXX
 //   weil der "4 Milchnutzer + 2 PBB-Nutzer" Hinweis im quotenkommentar einer
 //   Frage steht statt in gruppe.quotengruppen[]. Claude entscheidet bei
 //   Unsicherheit konservativ und laesst quotengruppen[] weg.
-// - Fix: Builder-seitiger deterministischer Extractor ergaenzt quotengruppen[]
+// - Fix A: Builder-seitiger deterministischer Extractor ergaenzt quotengruppen[]
 //   automatisch, wenn er im quotenkommentar oder studien_quoten ein
 //   "N [Label] + M [Label]" Pattern findet, das Gruppen-IDs der aktuellen
 //   Gruppe nennt (z.B. "GD3+GD4: davon 4 Milchnutzer + 2 PBB-Nutzer").
+// - Problem B: Bei langen QG-Listen (>250 Zeichen gesamt, z.B. got2b-IDI mit
+//   8 Demographie-Sub-Profilen) fiel Excel-Inline-DataValidation aus
+//   (Limit), Dropdown fehlte. Box wurde trotzdem rendered.
+// - Fix B: Fallback auf Range-Reference: Labels werden in Hilfsspalte 250
+//   (weit rechts, ausserhalb sichtbaren Bereich) geschrieben, DataValidation
+//   referenziert per "=$IP$1:$IP$N". Damit unlimitierte Listen-Laenge.
 // - Konservativ: Greift nur wenn gruppe.quotengruppen leer/nicht vorhanden ist.
 //   Wenn Parser was geliefert hat, hat das Vorrang.
 // - Logging: Extrahierte QGs landen in qgDebug mit _meta='auto_extracted' fuer
@@ -997,26 +1003,41 @@ function applyQuotengruppenDropdown(ws, qgCol, qgLabels, tnStart, tnEnd) {
   // Maximale Listenlänge in Excel: 255 Zeichen für Inline-Listen.
   const sanitizedLabels = qgLabels.map(l => String(l).replace(/,/g, ' /'));
   const listStr = sanitizedLabels.join(',');
-  const inlineList = listStr.length <= 250
-    ? `"${listStr}"`
-    : null;
+  let formulae;
+  if (listStr.length <= 250) {
+    // Kurz genug für Inline-Liste
+    formulae = [`"${listStr}"`];
+  } else {
+    // v12.22.10: Lange Listen -> Hilfsbereich rechts neben Sheet anlegen und
+    // per Range-Reference einbinden. Excel-Limit fuer Inline-Listen umgehen.
+    // Wir nehmen Spalte 250+ (weit rechts, außerhalb sichtbarer Bereich),
+    // schreiben dort die Labels untereinander und referenzieren absolut.
+    const helperCol = 250;  // Spalte mit Index 250 ist sehr weit rechts (~IP)
+    const helperColLetter = columnNumberToLetter(helperCol);
+    for (let i = 0; i < sanitizedLabels.length; i++) {
+      const helperRow = i + 1;
+      const cell = ws.getCell(helperRow, helperCol);
+      cell.value = sanitizedLabels[i];
+      // Optional: Hilfszellen ausblenden via white-on-white wäre möglich,
+      // aber die Spalte ist außerhalb des Druckbereichs und visuell unauffällig.
+    }
+    formulae = [`=$${helperColLetter}$1:$${helperColLetter}$${sanitizedLabels.length}`];
+  }
 
   for (let r = tnStart; r <= tnEnd; r++) {
     const cell = ws.getCell(r, qgCol);
-    if (inlineList) {
-      cell.dataValidation = {
-        type: 'list',
-        allowBlank: true,
-        formulae: [inlineList],
-        showErrorMessage: true,
-        errorStyle: 'warning',
-        errorTitle: 'Quotengruppe',
-        error: 'Bitte einen Eintrag aus der Liste wählen.',
-        showInputMessage: true,
-        promptTitle: 'Quotengruppe',
-        prompt: 'Welche Quotengruppe nach Screening?',
-      };
-    }
+    cell.dataValidation = {
+      type: 'list',
+      allowBlank: true,
+      formulae: formulae,
+      showErrorMessage: true,
+      errorStyle: 'warning',
+      errorTitle: 'Quotengruppe',
+      error: 'Bitte einen Eintrag aus der Liste wählen.',
+      showInputMessage: true,
+      promptTitle: 'Quotengruppe',
+      prompt: 'Welche Quotengruppe nach Screening?',
+    };
     // v12.22.3: Styling angeglichen an Nachbar-Zellen (Arial 10pt, center/center)
     cell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
     cell.font = { name: 'Arial', size: 10 };
