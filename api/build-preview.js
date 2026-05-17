@@ -116,6 +116,19 @@
 //   das fehlt, auf Spalten-Berechnung zurückfallen. EMU↔Pixel-Umrechnung
 //   per Heuristik (Werte >10000 = EMU).
 //
+// v12.22.9 (16.05.2026): SORTIER-FIX + LETZTE-TEILNAHME-FILTER
+// - Bug 1: F11 "Alter der Kinder" wurde vor F1-F6 sortiert, weil REGEX_ALTER
+//   `\balter\b` auch auf "Alter der Kinder" matchte. Fix: spezifischere
+//   Regex die nur die Hauptfrage "Wie alt sind Sie?" / "Alter [von Antworten]"
+//   matcht — Folgefragen mit "Alter der Kinder" / "Alter der Eltern" etc.
+//   bekommen Score 2 (andere persönliche Daten) und landen in
+//   Screener-Reihenfolge nach F10.
+// - Bug 2: F6 "Letzte Studie 3 Monate" / "Wann zuletzt an Marktforschung
+//   teilgenommen" wurde vom Parser durchgeschleift trotz PATCH 20-Anweisung.
+//   Fix: Builder-seitiger Fallback-Filter mit Pattern auf kurz_label und
+//   fragetext — fängt typische Studien-Teilnahme-Historie-Fragen ab und
+//   filtert sie analog zu kategorie='entfaellt'.
+//
 // v12.22.8 (15.05.2026): QG-SPALTE GRAU STATT AUSGEBLENDET
 // - Wenn ein Sheet nur 1 Quotengruppe enthält: Spalte F NICHT mehr verstecken
 //   (hidden + width=0.1 kollabierten den Logo-Bereich → Logo verzerrt).
@@ -1800,7 +1813,11 @@ function writeIdiInfoBlock(ws, opts) {
 function sortFragenSoziodemoFirst(fragen) {
   if (!Array.isArray(fragen)) return [];
   const REGEX_GESCHLECHT = /(geschlecht|geschlechts[\s-]?identit|m[äa]nnlich.*weiblich)/i;
-  const REGEX_ALTER = /\balter\b|wie alt sind sie|altersgruppe/i;
+  // v12.22.9: praeziser — nur die Hauptfrage "Wie alt sind Sie?" / "Alter" /
+  // "Altersgruppe" matcht. Folgefragen wie "Alter der Kinder", "Alter der
+  // Eltern", "Alter beim ersten X" matchen NICHT (kommen in Screener-Reihenfolge
+  // nach ihrer Mutter-Frage wie F10 "Kinder im Haushalt").
+  const REGEX_ALTER = /^(f\s*\d+\.?\s*)?alter\b(?!\s+(der|von|beim?))|wie alt sind sie|altersgruppe/i;
 
   const score = (f) => {
     const txt = ((f.fragetext || '') + ' ' + (f.kurz_label || '')).toLowerCase();
@@ -1816,6 +1833,22 @@ function sortFragenSoziodemoFirst(fragen) {
     .map((f, i) => ({ f, i, s: score(f) }))
     .sort((a, b) => a.s - b.s || a.i - b.i)
     .map(x => x.f);
+}
+
+// v12.22.9: Studien-Teilnahme-Historie-Filter (defense in depth zu PATCH 20).
+// Auch wenn der Parser PATCH 20 nicht befolgt und so eine Frage durchschleift,
+// filtert der Builder sie zusaetzlich. Erkennt Fragen wie "F6 Letzte Studie",
+// "Wann zuletzt an Marktforschung teilgenommen", "Anzahl Teilnahmen letzte X Monate".
+// Diese Fragen gehoeren in den allgemeinen MaFo-Block (Spalte M Anonymitaet/
+// Aufzeichnung), nicht als eigene Spalte in den TN-Bereich.
+function isStudienTeilnahmeFrage(f) {
+  if (!f) return false;
+  const txt = ((f.fragetext || '') + ' ' + (f.kurz_label || '')).toLowerCase();
+  if (!txt.trim()) return false;
+  // Muster: "Teilnahme" oder "teilgenommen" oder "Letzte Studie" in Kombination
+  // mit "Studie" / "Befragung" / "Marktforschung" / "Umfrage"
+  const PAT = /(letzte[rs]?\s+(studie|befragung|marktforschung|umfrage|teilnahme)|zuletzt\s+(an einer|teilgenommen)|teilgenommen.*(studie|befragung|marktforschung|umfrage)|(studie|befragung|marktforschung|umfrage).*teilgenommen|wie oft.*(studie|befragung|teilgenommen)|anzahl.*teilnahmen|teilnahme[ -]?historie)/i;
+  return PAT.test(txt);
 }
 
 // v11.4: Reduziert ein zu langes kurz_label intelligent auf 1-2 Wörter.
@@ -2646,6 +2679,7 @@ function collectAnforderungen(fragen, gruppeId, clusterMap) {
   const ergebnisse = [];
   for (const frage of fragen || []) {
     if (frage.kategorie === 'entfaellt') continue;
+    if (isStudienTeilnahmeFrage(frage)) continue;  // v12.22.9
     const label = frage.kurz_label || frage.id;
     const clusterEntry = (clusterMap && frage.id) ? clusterMap[frage.id] : null;
     const clusterColor = clusterEntry ? clusterEntry.colorArgb : null;
@@ -2693,6 +2727,7 @@ function collectGlobalScreenouts(fragen) {
   const ergebnisse = [];
   for (const frage of fragen || []) {
     if (frage.kategorie === 'entfaellt') continue;
+    if (isStudienTeilnahmeFrage(frage)) continue;  // v12.22.9
     const label = frage.kurz_label || frage.id;
 
     if (Array.isArray(frage.antworten)) {
@@ -2729,6 +2764,7 @@ function collectGlobalHinweise(fragen) {
   const ergebnisse = [];
   for (const frage of fragen || []) {
     if (frage.kategorie === 'entfaellt') continue;
+    if (isStudienTeilnahmeFrage(frage)) continue;  // v12.22.9
     const label = frage.kurz_label || frage.id;
 
     // Quotenkommentar auf Frage-Ebene
@@ -3106,6 +3142,7 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
   let maxAnswers = 0;
   for (const f of sortedFragen) {
     if (f.typ === 'entfaellt' || f.kategorie === 'entfaellt' || f.kategorie === 'verfuegbarkeit') continue;
+    if (isStudienTeilnahmeFrage(f)) continue;  // v12.22.9
     // Filter: relevantFuerGruppen
     if (Array.isArray(f.relevantFuerGruppen) && f.relevantFuerGruppen.length
         && !f.relevantFuerGruppen.includes('alle')
@@ -3132,6 +3169,8 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
         frage.kategorie === 'verfuegbarkeit') {
       continue;
     }
+    // v12.22.9: Studien-Teilnahme-Historie raus (PATCH 20 defense in depth)
+    if (isStudienTeilnahmeFrage(frage)) continue;
     // v12.6: Auto-Fix - wenn typ='numerisch' oder 'freitext' aber antworten[] mit
     // Codes UND Texten gefuellt ist, ist es eigentlich single_choice (typischer
     // Parser-Fehler bei Fragen wie 'Alter: ___' mit Optionen 1-3 darunter).
@@ -3696,7 +3735,7 @@ export default async function handler(req, res) {
         laufzeitBis: builderOptions.laufzeitBis,
         // v12.22.1: Quotengruppen-Debug pro Sheet
         qgDebug: globalThis.__QG_DEBUG__ || [],
-        version: 'v12.22.8-qg-grayout',
+        version: 'v12.22.9-sort-fix',
       },
     });
   } catch (err) {
@@ -3709,7 +3748,7 @@ export default async function handler(req, res) {
       errorType: err?.name || 'Error',
       stack: err?.stack ? String(err.stack).split('\n').slice(0, 8) : null,
       qgDebug: globalThis.__QG_DEBUG__ || [],
-      version: 'v12.22.8-qg-grayout',
+      version: 'v12.22.9-sort-fix',
     });
   }
 }
