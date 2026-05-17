@@ -116,6 +116,20 @@
 //   das fehlt, auf Spalten-Berechnung zurückfallen. EMU↔Pixel-Umrechnung
 //   per Heuristik (Werte >10000 = EMU).
 //
+// v12.22.10 (17.05.2026): AUTO-EXTRACT QUOTENGRUPPEN AUS FREITEXT
+// - Problem: Parser ignoriert PATCH 22 + Extract-Regel (v12.14.2) bei VELOXX
+//   weil der "4 Milchnutzer + 2 PBB-Nutzer" Hinweis im quotenkommentar einer
+//   Frage steht statt in gruppe.quotengruppen[]. Claude entscheidet bei
+//   Unsicherheit konservativ und laesst quotengruppen[] weg.
+// - Fix: Builder-seitiger deterministischer Extractor ergaenzt quotengruppen[]
+//   automatisch, wenn er im quotenkommentar oder studien_quoten ein
+//   "N [Label] + M [Label]" Pattern findet, das Gruppen-IDs der aktuellen
+//   Gruppe nennt (z.B. "GD3+GD4: davon 4 Milchnutzer + 2 PBB-Nutzer").
+// - Konservativ: Greift nur wenn gruppe.quotengruppen leer/nicht vorhanden ist.
+//   Wenn Parser was geliefert hat, hat das Vorrang.
+// - Logging: Extrahierte QGs landen in qgDebug mit _meta='auto_extracted' fuer
+//   Forensik bei Fehlmatches.
+//
 // v12.22.9 (16.05.2026): SORTIER-FIX + LETZTE-TEILNAHME-FILTER
 // - Bug 1: F11 "Alter der Kinder" wurde vor F1-F6 sortiert, weil REGEX_ALTER
 //   `\balter\b` auch auf "Alter der Kinder" matchte. Fix: spezifischere
@@ -582,6 +596,220 @@ function findQuotengruppenCol(ws) {
   return foundCol;
 }
 
+// v12.22.10: Auto-Extract von Quotengruppen aus Freitext-Hinweisen.
+// Sucht in quotenkommentar und studien_quoten nach Pattern wie:
+//   "4 Milchnutzer + 2 PBB-Nutzer"
+//   "davon 4 [Label] + 2 [Label] pro Gruppe"
+//   "je 4 [Label], 4 [Label]"
+//   "5 [Label] / 5 [Label]"
+// Wenn die aktuelle gruppe.id im selben Text genannt ist (GD3, GD3+GD4 etc.),
+// werden die Pattern als quotengruppen[] zurueckgegeben.
+// Gibt null zurueck wenn nichts gefunden wurde.
+function extractQuotengruppenFromFreitext(gruppe, fragenArr, studienQuoten) {
+  if (!gruppe || !gruppe.id) return null;
+  const gruppeId = String(gruppe.id);
+  const brutto = gruppe.brutto || 8;
+
+  // Sammle alle Texte die fuer diese Gruppe relevant sein koennten.
+  // Jeder Bucket hat: source (debug), text (zu scannen), implicitGruppenIds (optional),
+  // antwortenMapping (optional, fuer kontext-aware Zuordnung).
+  const textBuckets = [];
+  if (Array.isArray(fragenArr)) {
+    for (const f of fragenArr) {
+      if (!f) continue;
+      const qk = (f.quotenkommentar || '').trim();
+      if (qk) {
+        // Sammle alle gilt_fuer_gruppen-Sets pro Antwort + die Antwort-Texte
+        const sollQuoteSets = [];
+        const antwortContext = [];  // [{antwortText, sollQuoteText, gruppenIds}]
+        if (Array.isArray(f.antworten)) {
+          for (const ant of f.antworten) {
+            if (Array.isArray(ant.soll_quote)) {
+              for (const sq of ant.soll_quote) {
+                if (Array.isArray(sq.gilt_fuer_gruppen) && sq.gilt_fuer_gruppen.length > 0) {
+                  const ids = sq.gilt_fuer_gruppen.map(g => String(g).toUpperCase());
+                  sollQuoteSets.push(ids);
+                  antwortContext.push({
+                    antwortText: (ant.text || '').toLowerCase(),
+                    sollQuoteText: (sq.text || '').toLowerCase(),
+                    code: ant.code,
+                    gruppenIds: ids,
+                  });
+                }
+              }
+            }
+          }
+        }
+        // Eindeutige Zuordnung: nur ein Set ODER alle identisch
+        let implicit = null;
+        if (sollQuoteSets.length === 1) {
+          implicit = sollQuoteSets[0];
+        } else if (sollQuoteSets.length > 1) {
+          const first = sollQuoteSets[0].slice().sort().join(',');
+          if (sollQuoteSets.every(s => s.slice().sort().join(',') === first)) implicit = sollQuoteSets[0];
+        }
+        textBuckets.push({
+          source: `frage.${f.id || '?'}.quotenkommentar`,
+          text: qk,
+          implicitGruppenIds: implicit,
+          antwortContext: antwortContext.length > 1 ? antwortContext : null,
+        });
+      }
+      // Auch soll_quote-Texte scannen: hier ist gilt_fuer_gruppen PRO Eintrag klar
+      if (Array.isArray(f.antworten)) {
+        for (const ant of f.antworten) {
+          if (Array.isArray(ant.soll_quote)) {
+            for (const sq of ant.soll_quote) {
+              const sqt = (sq.text || '').trim();
+              if (sqt) textBuckets.push({
+                source: `frage.${f.id}.antwort.${ant.code}.soll_quote`,
+                text: sqt,
+                implicitGruppenIds: Array.isArray(sq.gilt_fuer_gruppen) && sq.gilt_fuer_gruppen.length > 0
+                  ? sq.gilt_fuer_gruppen.map(g => String(g).toUpperCase())
+                  : null,
+                antwortContext: null,
+              });
+            }
+          }
+        }
+      }
+    }
+  }
+  if (Array.isArray(studienQuoten)) {
+    studienQuoten.forEach((sq, i) => {
+      const t = (typeof sq === 'string' ? sq : (sq && sq.text) || '').trim();
+      if (t) textBuckets.push({ source: `studien_quoten[${i}]`, text: t, implicitGruppenIds: null, antwortContext: null });
+    });
+  }
+  if (textBuckets.length === 0) return null;
+
+  // Pattern fuer "N [Label] + M [Label]" — Label endet vor Bindewort/Punkt/Komma
+  // Erlaubt auch Variationen mit "x"/"×"/"TN"/"davon" davor
+  // Gruppen-Capture: (zahl1) (label1) (zahl2) (label2)
+  const PAT_PLUS = /(?:^|[\s,;:.(])(?:davon\s+|je\s+)?(\d+)\s*(?:x|×|TN\s+)?\s*([\p{L}][\p{L}\d\s\-_/]*?)\s*\+\s*(\d+)\s*(?:x|×|TN\s+)?\s*([\p{L}][\p{L}\d\s\-_/]*?)(?=\s*(?:pro\s+gruppe|je\s+gruppe|anderer?\s+sorten?|sorten|[,;.()\n]|$))/giu;
+  // Pattern fuer "N / N" Splits ("5 got2b-Nutzer / 5 Nicht-Nutzer") — etwas restriktiver
+  const PAT_SLASH = /(?:^|[\s,;:.(])(\d+)\s+([\p{L}][\p{L}\d\s\-_]*?)\s*\/\s*(\d+)\s+([\p{L}][\p{L}\d\s\-_]*?)(?=[,;.()\n]|$)/giu;
+
+  // Helper: bestimmt fuer einen Match welche Gruppen-IDs gelten.
+  // Konservativ — nur sichere Fälle:
+  //   1. bucket.implicitGruppenIds gesetzt (eindeutige soll_quote.gilt_fuer_gruppen)
+  //   2. Explizite Gruppen-IDs im umgebenden Hauptsatz
+  // Heuristik (Token-Match auf Antwort-Text) wurde entfernt — zu unzuverlässig
+  // bei paraphrasierten Quotenkommentaren ("2 Gruppen erwägen" vs.
+  // "konsumiere keine zuckerfreie Option").
+  function resolveGruppenIdsForMatch(bucket, matchPos, matchLen) {
+    if (Array.isArray(bucket.implicitGruppenIds)) return bucket.implicitGruppenIds;
+    // Suche Gruppen-IDs im Hauptsatz um den Match (zwischen . und .)
+    const HARD_SENT = /[.;!\n]/g;
+    let segStart = 0, segEnd = bucket.text.length;
+    HARD_SENT.lastIndex = 0;
+    let m;
+    while ((m = HARD_SENT.exec(bucket.text)) !== null && m.index < matchPos) {
+      segStart = m.index + 1;
+    }
+    HARD_SENT.lastIndex = matchPos + matchLen;
+    const next = HARD_SENT.exec(bucket.text);
+    if (next) segEnd = next.index;
+    const segment = bucket.text.substring(segStart, segEnd);
+    const ids = (segment.match(/\b(?:GD|IDI|VGD|VDI)\d+\b/gi) || []).map(s => s.toUpperCase());
+    return ids.length > 0 ? ids : null;
+  }
+
+
+  const cleanLabel = (s) => {
+    if (!s) return '';
+    return String(s)
+      .replace(/\s+/g, ' ')
+      .replace(/^[\s\-_/]+|[\s\-_/]+$/g, '')
+      .replace(/^(TN|Teilnehmer)\s+/i, '')
+      .trim();
+  };
+
+  // Plausi: ein extrahierter Match ist nur dann ein echter QG-Split wenn:
+  //   - Summe N+M == brutto  (z.B. 4+2=6, 5+5=10, 4+4=8)
+  //   - ODER Summe == brutto - safetyBuffer (manche Studien planen Backups)
+  //   - Beide Labels sind plausibel (mehr als 2 chars, kein reines Zahlwort)
+  const plausibleSum = (n1, n2) => {
+    const sum = n1 + n2;
+    return sum === brutto || sum === brutto - 1 || sum === brutto - 2 || sum === brutto + 2;
+  };
+  const plausibleLabel = (s) => s && s.length >= 3 && s.length <= 40 && !/^\d+$/.test(s);
+
+  for (const bucket of textBuckets) {
+    const text = bucket.text;
+    // Plus-Pattern
+    PAT_PLUS.lastIndex = 0;
+    let m;
+    while ((m = PAT_PLUS.exec(text)) !== null) {
+      const n1 = parseInt(m[1], 10);
+      const l1 = cleanLabel(m[2]);
+      const n2 = parseInt(m[3], 10);
+      const l2 = cleanLabel(m[4]);
+      if (!plausibleLabel(l1) || !plausibleLabel(l2)) continue;
+      if (!plausibleSum(n1, n2)) continue;
+      // Bestimme welche Gruppen-IDs fuer DIESEN Match gelten
+      const matchGruppenIds = resolveGruppenIdsForMatch(bucket, m.index, m[0].length)
+        || (text.match(/\b(?:GD|IDI|VGD|VDI)\d+\b/gi) || []).map(s => s.toUpperCase());
+      if (matchGruppenIds.length === 0) continue;  // keine Zuordnung moeglich
+      if (!matchGruppenIds.includes(gruppeId.toUpperCase())) continue;  // nicht diese Gruppe
+      // Match!
+      const qgs = [
+        { id: `${gruppeId}.A`, label: l1, n_target: n1, demographics: {
+            alter_min: gruppe.alter_min ?? null, alter_max: gruppe.alter_max ?? null,
+            geschlecht: gruppe.geschlecht ?? null, standort: gruppe.standort ?? null },
+          zuordnungs_regel: `Auto-extrahiert aus: "${text.substring(0, 100)}${text.length > 100 ? '...' : ''}"`,
+        },
+        { id: `${gruppeId}.B`, label: l2, n_target: n2, demographics: {
+            alter_min: gruppe.alter_min ?? null, alter_max: gruppe.alter_max ?? null,
+            geschlecht: gruppe.geschlecht ?? null, standort: gruppe.standort ?? null },
+          zuordnungs_regel: `Auto-extrahiert aus: "${text.substring(0, 100)}${text.length > 100 ? '...' : ''}"`,
+        },
+      ];
+      if (!globalThis.__QG_DEBUG__) globalThis.__QG_DEBUG__ = [];
+      globalThis.__QG_DEBUG__.push({
+        _meta: 'auto_extracted', gruppe: gruppeId, source: bucket.source,
+        pattern: 'plus', match: `${n1} ${l1} + ${n2} ${l2}`, sumOk: n1 + n2,
+        resolvedFor: matchGruppenIds,
+      });
+      return qgs;
+    }
+    // Slash-Pattern
+    PAT_SLASH.lastIndex = 0;
+    while ((m = PAT_SLASH.exec(text)) !== null) {
+      const n1 = parseInt(m[1], 10);
+      const l1 = cleanLabel(m[2]);
+      const n2 = parseInt(m[3], 10);
+      const l2 = cleanLabel(m[4]);
+      if (!plausibleLabel(l1) || !plausibleLabel(l2)) continue;
+      if (!plausibleSum(n1, n2)) continue;
+      const matchGruppenIds = resolveGruppenIdsForMatch(bucket, m.index, m[0].length)
+        || (text.match(/\b(?:GD|IDI|VGD|VDI)\d+\b/gi) || []).map(s => s.toUpperCase());
+      if (matchGruppenIds.length === 0) continue;
+      if (!matchGruppenIds.includes(gruppeId.toUpperCase())) continue;
+      const qgs = [
+        { id: `${gruppeId}.A`, label: l1, n_target: n1, demographics: {
+            alter_min: gruppe.alter_min ?? null, alter_max: gruppe.alter_max ?? null,
+            geschlecht: gruppe.geschlecht ?? null, standort: gruppe.standort ?? null },
+          zuordnungs_regel: `Auto-extrahiert aus: "${text.substring(0, 100)}${text.length > 100 ? '...' : ''}"`,
+        },
+        { id: `${gruppeId}.B`, label: l2, n_target: n2, demographics: {
+            alter_min: gruppe.alter_min ?? null, alter_max: gruppe.alter_max ?? null,
+            geschlecht: gruppe.geschlecht ?? null, standort: gruppe.standort ?? null },
+          zuordnungs_regel: `Auto-extrahiert aus: "${text.substring(0, 100)}${text.length > 100 ? '...' : ''}"`,
+        },
+      ];
+      if (!globalThis.__QG_DEBUG__) globalThis.__QG_DEBUG__ = [];
+      globalThis.__QG_DEBUG__.push({
+        _meta: 'auto_extracted', gruppe: gruppeId, source: bucket.source,
+        pattern: 'slash', match: `${n1} ${l1} / ${n2} ${l2}`, sumOk: n1 + n2,
+        resolvedFor: matchGruppenIds,
+      });
+      return qgs;
+    }
+  }
+  return null;
+}
+
 // Baut die QG-Liste für ein Sheet aus den vorhandenen Daten.
 // Berücksichtigt das neue Schema (gruppe.quotengruppen) und Backward-Compat
 // (idiProfile bei konsolidierten IDI-Sheets, gruppe.zielgruppe als Single-QG).
@@ -590,6 +818,14 @@ function buildQuotengruppenForSheet(gruppe, opts) {
   // 1) Neues Schema: gruppe.quotengruppen[] direkt verwenden
   if (Array.isArray(gruppe.quotengruppen) && gruppe.quotengruppen.length > 0) {
     return gruppe.quotengruppen.map((qg, i) => normalizeQG(qg, gruppe, i));
+  }
+  // v12.22.10: 1b) Auto-Extract aus Freitext-Hinweisen (PATCH 22-Fallback)
+  // Greift wenn Parser keine quotengruppen[] geliefert hat, aber im
+  // quotenkommentar/studien_quoten ein "N [A] + M [B]"-Pattern fuer diese
+  // Gruppe steht.
+  const autoExtracted = extractQuotengruppenFromFreitext(gruppe, o.fragenArr, o.studienQuoten);
+  if (autoExtracted && autoExtracted.length > 1) {
+    return autoExtracted.map((qg, i) => normalizeQG(qg, gruppe, i));
   }
   // 2) IDI/VDI mit idiProfile[] -> 1 QG pro eindeutigem Segment
   const isIDI = gruppe.methode === 'IDI' || gruppe.methode === 'VDI';
@@ -3443,7 +3679,12 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
       hasQuotengruppen: Array.isArray(gruppe.quotengruppen) && gruppe.quotengruppen.length > 0,
     };
     if (qgCol) {
-      const qgList = buildQuotengruppenForSheet(gruppe, opts);
+      // v12.22.10: fragenArr + studienQuoten an Auto-Extract durchreichen
+      const qgList = buildQuotengruppenForSheet(gruppe, {
+        ...opts,
+        fragenArr: fragen,
+        studienQuoten: opts.studien_quoten,
+      });
       const qgColLetter = columnNumberToLetter(qgCol);
       dbg.qgListLength = qgList.length;
       dbg.qgLabels = qgList.map(q => q.label);
@@ -3610,11 +3851,14 @@ export default async function handler(req, res) {
       // v11.4: termin_blocks ebenfalls nur bei IDI (bei GD pro Sheet 1 Termin im Header)
       // v12.16: preMerges PRO GRUPPE in sheetOptions, damit fillSheet die korrekten
       // Template-Merges fuer die TN-Bereich-Replikation hat.
+      // v12.22.10: studien_quoten wird auch bei GD durchgereicht, damit
+      // extractQuotengruppenFromFreitext darauf zugreifen kann. Sonst nur
+      // bei IDIs noetig (Profile/Termin-Blocks).
       const baseOpts = { ...builderOptions, preMerges: preMergesFG };
       const sheetOptions = includeIdiInfo
         ? baseOpts
         : { ...baseOpts, idiProfile: null, segment_beschreibungen: null,
-            studien_quoten: null, termin_blocks: null };
+            termin_blocks: null };
 
       fillSheet(
         dstWs, gruppe, fragenFG, projektnummer, projektname,
@@ -3735,7 +3979,7 @@ export default async function handler(req, res) {
         laufzeitBis: builderOptions.laufzeitBis,
         // v12.22.1: Quotengruppen-Debug pro Sheet
         qgDebug: globalThis.__QG_DEBUG__ || [],
-        version: 'v12.22.9-sort-fix',
+        version: 'v12.22.10-qg-extract',
       },
     });
   } catch (err) {
@@ -3748,7 +3992,7 @@ export default async function handler(req, res) {
       errorType: err?.name || 'Error',
       stack: err?.stack ? String(err.stack).split('\n').slice(0, 8) : null,
       qgDebug: globalThis.__QG_DEBUG__ || [],
-      version: 'v12.22.9-sort-fix',
+      version: 'v12.22.10-qg-extract',
     });
   }
 }
