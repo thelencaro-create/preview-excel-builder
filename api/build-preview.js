@@ -116,6 +116,18 @@
 //   das fehlt, auf Spalten-Berechnung zurückfallen. EMU↔Pixel-Umrechnung
 //   per Heuristik (Werte >10000 = EMU).
 //
+// v12.22.11 (17.05.2026): QG-BOX KOLLISIONS-FIX
+// - Problem: Bei >= 5 Quotengruppen (z.B. got2b-IDI mit 8 Demographie-
+//   Sub-Profilen) lief die QG-Uebersichts-Box von Z1 bis Z(N+1) und
+//   ueberschrieb damit ab Z6 die Frage-Header-Zeile. In den 8-QG-Faellen
+//   stand "Nicht-Nutzer got2b 16-24 weiblich" auf Q6 statt der ersten
+//   Frage.
+// - Fix: Box-Position dynamisch. Bei <= 4 QGs bleibt sie wie bisher an
+//   quoteStartCol (Spalte Q ueber den Antwort-Spalten, kompakt). Bei
+//   >= 5 QGs wird sie nach rechts hinter den letzten Frage-Bereich
+//   verschoben (currentCol+1), damit keine Kollision mit Z6 entsteht.
+// - Logging: qgDebug.boxPosition fasst die Entscheidung zusammen.
+//
 // v12.22.10 (17.05.2026): AUTO-EXTRACT QUOTENGRUPPEN AUS FREITEXT + DV-FIX
 // - Problem A: Parser ignoriert PATCH 22 + Extract-Regel (v12.14.2) bei VELOXX
 //   weil der "4 Milchnutzer + 2 PBB-Nutzer" Hinweis im quotenkommentar einer
@@ -3713,7 +3725,19 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
         // Mehrere QGs → Dropdown + Übersichts-Box
         const qgLabels = qgList.map(q => q.label);
         applyQuotengruppenDropdown(ws, qgCol, qgLabels, TN_START, tnEnd);
-        renderQuotenUebersicht(ws, qgList, quoteStartCol, qgColLetter, TN_START, tnEnd);
+        // v12.22.11: Box-Position abhaengig von QG-Anzahl. Box laeuft von Z1
+        // bis Z(qgList.length + 1). Ab 5 QGs kollidiert sie mit der Frage-
+        // Header-Zeile (HEADER_ROW=6). Dann nach rechts hinter den letzten
+        // Frage-Bereich verschieben, sonst bleibt sie an quoteStartCol (=
+        // direkt ueber den Antwort-Spalten, kompakt).
+        const wouldCollide = (qgList.length + 1) >= HEADER_ROW;
+        const boxStartCol = wouldCollide ? (currentCol + 1) : quoteStartCol;
+        if (wouldCollide) {
+          dbg.boxPosition = { reason: 'avoid_collision_with_header_row',
+            qgCount: qgList.length, movedToCol: boxStartCol,
+            originalCol: quoteStartCol };
+        }
+        renderQuotenUebersicht(ws, qgList, boxStartCol, qgColLetter, TN_START, tnEnd);
         dbg.action = 'rendered_dropdown_and_box';
       } else {
         // v12.22.8: Bei nur 1 QG die Spalte NICHT mehr ausblenden — sonst kollabiert
@@ -4000,7 +4024,7 @@ export default async function handler(req, res) {
         laufzeitBis: builderOptions.laufzeitBis,
         // v12.22.1: Quotengruppen-Debug pro Sheet
         qgDebug: globalThis.__QG_DEBUG__ || [],
-        version: 'v12.22.10-qg-extract',
+        version: 'v12.22.11-qg-box-fix',
       },
     });
   } catch (err) {
@@ -4013,7 +4037,7 @@ export default async function handler(req, res) {
       errorType: err?.name || 'Error',
       stack: err?.stack ? String(err.stack).split('\n').slice(0, 8) : null,
       qgDebug: globalThis.__QG_DEBUG__ || [],
-      version: 'v12.22.10-qg-extract',
+      version: 'v12.22.11-qg-box-fix',
     });
   }
 }
