@@ -116,6 +116,20 @@
 //   das fehlt, auf Spalten-Berechnung zurückfallen. EMU↔Pixel-Umrechnung
 //   per Heuristik (Werte >10000 = EMU).
 //
+// v12.22.12 (17.05.2026): IDI-PROFIL N_TARGET-FIX
+// - Problem: Bei got2b lieferte der Parser nur 4 idiProfile-Eintraege
+//   (Block-Stellvertreter IDI1, IDI4, IDI6, IDI9 mit "3 Teilnehmer"-Text
+//   in profile_quoten) fuer 12 echte Interview-Slots. Builder zaehlte
+//   info.count++ pro Eintrag -> Soll 2 statt 6 pro QG-Segment.
+// - Fix: 3-stufige n_target-Berechnung im idiProfile-Pfad:
+//   a) Extrahiere "N Teilnehmer/TN/Personen" aus profile_quoten.text und
+//      summiere pro Segment (got2b-Fall: 3+3=6 pro Segment)
+//   b) Fallback: gruppe.brutto durch Anzahl Segmente teilen (12/2=6)
+//   c) Fallback: info.count wie bisher (klassisch JPM mit individuellen
+//      idiProfile-Eintraegen)
+// - Logging: qgDebug._meta='idi_profile_qg' enthaelt nTargetSource +
+//   sumNTarget zur Forensik (sollte gleich brutto sein).
+//
 // v12.22.11 (17.05.2026): QG-BOX KOLLISIONS-FIX
 // - Problem: Bei >= 5 Quotengruppen (z.B. got2b-IDI mit 8 Demographie-
 //   Sub-Profilen) lief die QG-Uebersichts-Box von Z1 bis Z(N+1) und
@@ -852,20 +866,75 @@ function buildQuotengruppenForSheet(gruppe, opts) {
     const segCount = new Map();
     for (const p of o.idiProfile) {
       const key = p.segment || 'Allgemein';
-      const cur = segCount.get(key) || { count: 0, sample: p };
+      const cur = segCount.get(key) || { count: 0, sample: p, idis: [] };
       cur.count++;
+      cur.idis.push(p);
       segCount.set(key, cur);
     }
+
+    // v12.22.11: Bessere n_target-Berechnung.
+    // Problem: Wenn der Parser nicht pro Einzelinterview einen idiProfile-Eintrag
+    // liefert sondern pro Termin-Block einen (Block-Stellvertreter), zaehlt
+    // info.count nur die Bloecke (z.B. 2+2=4 statt der echten 6+6=12).
+    // Strategie:
+    //   a) Versuche aus profile_quoten Text "N Teilnehmer/TN" zu extrahieren
+    //      (z.B. "3 Teilnehmer zwischen 16 und 24 Jahre alt") -> Pro Eintrag
+    //      diese Zahl statt 1.
+    //   b) Wenn Summe aller info.count < gruppe.brutto und brutto > 0,
+    //      verteile gruppe.brutto proportional auf die Segmente.
+    function extractTNCountFromProfileQuoten(idi) {
+      if (!Array.isArray(idi.profile_quoten)) return null;
+      for (const pq of idi.profile_quoten) {
+        const t = (pq && pq.text) || '';
+        // Pattern: "3 Teilnehmer" / "3 TN" / "je 3 TN" / "3 Personen"
+        const m = t.match(/(?:^|\s|^je\s+)(\d+)\s*(?:teilnehmer|tn\b|personen)/i);
+        if (m) {
+          const n = parseInt(m[1], 10);
+          if (n > 0 && n <= 50) return n;  // Plausi-Cap
+        }
+      }
+      return null;
+    }
+
+    // Strategie a: pro Segment versuchen wir, n_target aus den profile_quoten
+    // aller Block-Stellvertreter zu summieren
+    for (const [, info] of segCount.entries()) {
+      let summe = 0;
+      let alleHabenN = true;
+      for (const idi of info.idis) {
+        const n = extractTNCountFromProfileQuoten(idi);
+        if (n == null) { alleHabenN = false; break; }
+        summe += n;
+      }
+      if (alleHabenN && summe > 0) {
+        info.extractedN = summe;
+      }
+    }
+
+    // Strategie b: Fallback per Brutto-Verteilung
+    const sumCount = [...segCount.values()].reduce((s, v) => s + v.count, 0);
+    const brutto = gruppe.brutto || gruppe.tnBrutto || 0;
+    const useBruttoFallback = (!segCount.values().next().value?.extractedN)
+      && brutto > sumCount && segCount.size > 0;
+    let bruttoPerSeg = 0;
+    if (useBruttoFallback) {
+      bruttoPerSeg = Math.floor(brutto / segCount.size);
+    }
+
     let i = 0;
     const out = [];
     for (const [segName, info] of segCount.entries()) {
       const idSuffix = info.sample.segment_nr != null
         ? `S${info.sample.segment_nr}`
         : `S${i + 1}`;
+      // n_target: bevorzuge extractedN, dann Brutto-Verteilung, dann count
+      const nTarget = info.extractedN != null
+        ? info.extractedN
+        : (useBruttoFallback ? bruttoPerSeg : info.count);
       out.push({
         id: `${gruppe.id}.${idSuffix}`,
         label: buildQGLabel({ segment: segName, ...info.sample.demographics }),
-        n_target: info.count,
+        n_target: nTarget,
         demographics: {
           alter_min: info.sample.alter_min ?? null,
           alter_max: info.sample.alter_max ?? null,
@@ -878,6 +947,19 @@ function buildQuotengruppenForSheet(gruppe, opts) {
         segment_nr: info.sample.segment_nr ?? null,
       });
       i++;
+    }
+    // Plausi-Log
+    if (out.length > 0 && !globalThis.__QG_DEBUG__) globalThis.__QG_DEBUG__ = [];
+    if (out.length > 0) {
+      globalThis.__QG_DEBUG__.push({
+        _meta: 'idi_profile_qg', gruppe: gruppe.id,
+        segCount: out.length,
+        nTargetSource: out[0].n_target === segCount.values().next().value.extractedN
+          ? 'profile_quoten' : (useBruttoFallback ? 'brutto_division' : 'idi_count'),
+        nTargets: out.map(q => ({ label: q.label, n: q.n_target })),
+        sumNTarget: out.reduce((s, q) => s + q.n_target, 0),
+        brutto: brutto,
+      });
     }
     if (out.length > 0) return out;
   }
@@ -4024,7 +4106,7 @@ export default async function handler(req, res) {
         laufzeitBis: builderOptions.laufzeitBis,
         // v12.22.1: Quotengruppen-Debug pro Sheet
         qgDebug: globalThis.__QG_DEBUG__ || [],
-        version: 'v12.22.11-qg-box-fix',
+        version: 'v12.22.12-idi-ntarget',
       },
     });
   } catch (err) {
@@ -4037,7 +4119,7 @@ export default async function handler(req, res) {
       errorType: err?.name || 'Error',
       stack: err?.stack ? String(err.stack).split('\n').slice(0, 8) : null,
       qgDebug: globalThis.__QG_DEBUG__ || [],
-      version: 'v12.22.11-qg-box-fix',
+      version: 'v12.22.12-idi-ntarget',
     });
   }
 }
