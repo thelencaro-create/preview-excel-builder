@@ -116,6 +116,45 @@
 //   das fehlt, auf Spalten-Berechnung zurückfallen. EMU↔Pixel-Umrechnung
 //   per Heuristik (Werte >10000 = EMU).
 //
+// v12.22.15 (17.05.2026): QG-BOX UNTER TN IN SPALTE G + SEGMENTE RAUS
+// - User-Wunsch: QG-Counter unter TN-Bereich in Spalte G (dort wo frueher
+//   Segment-Beschreibungen, IDI-Profile-Liste und Studien-Quoten standen).
+//   Recruiter sieht ihn direkt nach dem Scrollen unter den letzten TN-Zeilen.
+// - Segment-Beschreibungen, IDI-Profile und Studien-Quoten werden NICHT mehr
+//   im Sheet-Body angezeigt — der Recruiter findet sie in der Quotenübersicht
+//   (Sheet 1). writeIdiInfoBlock ist No-Op.
+// - QG-Box-Layout (Z(tnEnd+8) abwaerts ab Spalte G):
+//     Row 1: "Quotengruppen-Counter" (Titel)
+//     Row 2: | Quotengruppe | Soll | Ist | Status |
+//     Row 3+: Daten-Zeile pro QG mit COUNTIF + Ampel
+// - Horizontale Box-Variante (v12.22.14) entfernt — nur noch ein Box-Stil
+//   unter TN. renderQuotenUebersicht bleibt als Funktion da fuer Backward-
+//   Kompatibilitaet, wird aber nicht mehr aufgerufen.
+//
+// v12.22.14 (17.05.2026): HORIZONTALES QG-BOX-LAYOUT BEI VIELEN QGs
+// - User-Feedback: bei v12.22.11 wurde die QG-Box bei ≥5 QGs nach rechts
+//   hinter den letzten Frage-Bereich (BG+) verschoben. Damit war der
+//   Soll/Ist-Counter im Recruiting-Workflow nicht mehr sichtbar — der
+//   Recruiter musste extra dorthin scrollen.
+// - Fix: Box bleibt IMMER an quoteStartCol (Spalte Q oberhalb der Frage-
+//   Spalten). Bei ≤4 QGs: vertikales Layout wie bisher (Z1-Z(N+1) in
+//   4 Spalten breit). Bei ≥5 QGs: HORIZONTALES Layout in Z1-Z4 ueber N
+//   Spalten breit (Z1=Label rotiert, Z2=Soll, Z3=Ist, Z4=Status-Ampel).
+//   Belegt damit Z1-Z4 ueber den ersten N Frage-Spalten, kollidiert nicht
+//   mit HEADER_ROW=6.
+// - Recruiter sieht damit immer den Counter "noch X uebrig pro QG"
+//   direkt im Blickfeld, egal wie viele QGs.
+//
+// v12.22.13 (17.05.2026): LABEL-KONSISTENZ ZWISCHEN BOX, DROPDOWN, COUNTIF
+// - Problem: Box-Label zeigte Kommas ("got2b-Nutzer, weiblich, 16-24 Jahre"),
+//   Dropdown und COUNTIF Slashes ("got2b-Nutzer / weiblich / 16-24 Jahre").
+//   Sah visuell inkonsistent aus (Box vs. Dropdown-Auswahl). Counter zaehlte
+//   technisch korrekt (Dropdown und COUNTIF beide mit Slash) — aber das
+//   Box-Label entsprach NICHT dem was im Dropdown stand.
+// - Fix: Box-Label benutzt jetzt dieselbe Sanitize-Logik wie Dropdown
+//   (Komma -> ' /'). Alle drei Stellen (Box-Anzeige, Dropdown-Liste,
+//   COUNTIF-Suchstring) sind jetzt deckungsgleich.
+//
 // v12.22.12 (17.05.2026): IDI-PROFIL N_TARGET-FIX
 // - Problem: Bei got2b lieferte der Parser nur 4 idiProfile-Eintraege
 //   (Block-Stellvertreter IDI1, IDI4, IDI6, IDI9 mit "3 Teilnehmer"-Text
@@ -1171,17 +1210,111 @@ function applyQuotengruppenDropdown(ws, qgCol, qgLabels, tnStart, tnEnd) {
   ws.addConditionalFormatting({ ref: range, rules });
 }
 
-// Schreibt die Quoten-Übersichts-Box in Z1..Z4 ab Spalte quoteStartCol.
-// Layout (4 Spalten breit):
-//   [Header-Zeile mit Spalten-Beschriftung] Quotengruppe | Soll | Ist | Status
-//   Die Daten-Zeilen liegen darunter (Z2..Z(1+N) bei N QGs).
-//
-// Wenn N > 4 (Box reicht über Z4 hinaus): wir lassen die Box wachsen, das
-// überlappt mit dem Matrix-Header (Z5) nicht — die Box steht in den ersten
-// 4 Zeilen oberhalb der Antwort-Codes.
+// Horizontales Layout der QG-Box: passt in Z1-Z4 ueber den Frage-Spalten.
+// Z1: QG-Label (eine Spalte pro QG)
+// Z2: Soll
+// Z3: Ist (=COUNTIF)
+// Z4: Ampel (Conditional Formatting)
+// Spannweite: startCol .. startCol + N - 1 (N = qgList.length)
+function renderQuotenUebersichtHorizontal(ws, qgList, startCol, qgColLetter, tnStart, tnEnd) {
+  const thinGrey = { style: 'thin', color: { argb: 'FFB8C5D6' } };
+  const fillBox = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFEAF1F8' } };
+
+  // Optional: linke Beschriftung wenn Platz ist (startCol-1)
+  // Schreiben "Quotengruppe" / "Soll" / "Ist" / "Status" als Zeilen-Labels
+  // nur wenn startCol > 1 — sonst weglassen.
+  if (startCol > 1) {
+    const labelCol = startCol - 1;
+    const rowLabels = ['Quotengruppe', 'Soll', 'Ist', 'Status'];
+    for (let i = 0; i < 4; i++) {
+      const c = ws.getCell(i + 1, labelCol);
+      c.value = rowLabels[i];
+      c.font = { name: 'Arial', size: 9, bold: true, italic: true, color: { argb: 'FF1F4E79' } };
+      c.alignment = { vertical: 'middle', horizontal: 'right' };
+    }
+  }
+
+  qgList.forEach((qg, idx) => {
+    const col = startCol + idx;
+    const labelDisplay = String(qg.label).replace(/,/g, ' /');
+    // Z1: Label (vertikal angeordnet zur Platzersparnis, leicht gedreht waere noch besser)
+    const labelCell = ws.getCell(1, col);
+    labelCell.value = labelDisplay;
+    labelCell.font = { name: 'Arial', size: 8, bold: true, color: { argb: 'FF1F4E79' } };
+    labelCell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true, textRotation: 0 };
+    labelCell.fill = fillBox;
+    labelCell.border = { top: thinGrey, bottom: thinGrey, left: thinGrey, right: thinGrey };
+
+    // Z2: Soll
+    const sollCell = ws.getCell(2, col);
+    sollCell.value = qg.n_target;
+    sollCell.font = { name: 'Arial', size: 10, bold: true };
+    sollCell.alignment = { vertical: 'middle', horizontal: 'center' };
+    sollCell.fill = fillBox;
+    sollCell.border = { top: thinGrey, bottom: thinGrey, left: thinGrey, right: thinGrey };
+
+    // Z3: Ist (COUNTIF)
+    const sanitizedLabel = labelDisplay.replace(/"/g, '""');
+    const istCell = ws.getCell(3, col);
+    istCell.value = {
+      formula: `COUNTIF(${qgColLetter}${tnStart}:${qgColLetter}${tnEnd},"${sanitizedLabel}")`,
+    };
+    istCell.font = { name: 'Arial', size: 10, bold: true };
+    istCell.alignment = { vertical: 'middle', horizontal: 'center' };
+    istCell.fill = fillBox;
+    istCell.border = { top: thinGrey, bottom: thinGrey, left: thinGrey, right: thinGrey };
+
+    // Z4: Status-Zelle fuer Ampel
+    const statusCell = ws.getCell(4, col);
+    statusCell.value = '';
+    statusCell.alignment = { vertical: 'middle', horizontal: 'center' };
+    statusCell.border = { top: thinGrey, bottom: thinGrey, left: thinGrey, right: thinGrey };
+  });
+
+  // Spaltenbreite leicht reduzieren fuer kompaktes Layout (~14)
+  for (let idx = 0; idx < qgList.length; idx++) {
+    const col = startCol + idx;
+    const existing = ws.getColumn(col).width;
+    if (!existing || existing > 16) ws.getColumn(col).width = 14;
+  }
+
+  // Bedingte Formatierung pro QG-Status-Zelle (Z4) — Ampel basierend auf Z2/Z3
+  const sollRow = 2, istRow = 3, statusRow = 4;
+  qgList.forEach((qg, idx) => {
+    const col = startCol + idx;
+    const colLetter = columnNumberToLetter(col);
+    const statusRef = `${colLetter}${statusRow}`;
+    const sollRef = `${colLetter}${sollRow}`;
+    const istRef  = `${colLetter}${istRow}`;
+    ws.addConditionalFormatting({
+      ref: statusRef,
+      rules: [
+        { type: 'expression', priority: 1, formulae: [`${istRef}=${sollRef}`],
+          style: { fill: { type: 'pattern', pattern: 'solid', bgColor: { argb: 'FFA9D08E' } } } },
+        { type: 'expression', priority: 2, formulae: [`${istRef}>${sollRef}`],
+          style: { fill: { type: 'pattern', pattern: 'solid', bgColor: { argb: 'FFFFC7CE' } } } },
+        { type: 'expression', priority: 3, formulae: [`AND(${istRef}>0,${istRef}<${sollRef})`],
+          style: { fill: { type: 'pattern', pattern: 'solid', bgColor: { argb: 'FFFFEB9C' } } } },
+      ],
+    });
+  });
+}
+
+// Schreibt die Quoten-Übersichts-Box ab Spalte quoteStartCol.
+// v12.22.14: Zwei Layout-Varianten je nach QG-Anzahl:
+//   - VERTIKAL (≤4 QGs): Z1=Headers, Z2..Z(1+N)=Daten — 4 Spalten breit
+//     [Quotengruppe | Soll | Ist | Status]
+//   - HORIZONTAL (≥5 QGs): Z1=Labels (eine pro Spalte), Z2=Soll, Z3=Ist,
+//     Z4=Status (Ampel). Spannweite = N Spalten ab quoteStartCol.
+//     Bleibt immer in Zeilen 1-4, kollidiert nicht mit HEADER_ROW=6.
 function renderQuotenUebersicht(ws, qgList, quoteStartCol, qgColLetter, tnStart, tnEnd) {
   if (!Array.isArray(qgList) || qgList.length === 0 || !quoteStartCol) return;
   const startCol = quoteStartCol;
+  const horizontalLayout = qgList.length >= 5;
+  if (horizontalLayout) {
+    return renderQuotenUebersichtHorizontal(ws, qgList, startCol, qgColLetter, tnStart, tnEnd);
+  }
+  // ---- VERTIKAL (≤4 QGs, klassisches Layout) ----
   // Z1: Header-Zeile
   const h1 = ws.getCell(1, startCol);
   h1.value = 'Quotengruppe';
@@ -1215,8 +1348,14 @@ function renderQuotenUebersicht(ws, qgList, quoteStartCol, qgColLetter, tnStart,
   // Daten-Zeilen ab Z2
   qgList.forEach((qg, idx) => {
     const r = 2 + idx;
+    // v12.22.13: Label im Box-Anzeigetext, Dropdown und COUNTIF MUSS identisch
+    // sein, sonst sucht COUNTIF einen String den Excel im Dropdown nie schreibt.
+    // applyQuotengruppenDropdown ersetzt Komma->/ (weil Komma die Excel-Liste
+    // zerreissen wuerde). Box und COUNTIF muessen genau das gleiche Format
+    // verwenden.
+    const labelDisplay = String(qg.label).replace(/,/g, ' /');
     const labelCell = ws.getCell(r, startCol);
-    labelCell.value = qg.label;
+    labelCell.value = labelDisplay;
     labelCell.font = { name: 'Arial', size: 9 };
     labelCell.alignment = { vertical: 'middle', horizontal: 'left', wrapText: true };
 
@@ -1226,7 +1365,7 @@ function renderQuotenUebersicht(ws, qgList, quoteStartCol, qgColLetter, tnStart,
     sollCell.alignment = { vertical: 'middle', horizontal: 'center' };
 
     // COUNTIF Formel auf die QG-Spalte F (qgColLetter) im TN-Bereich
-    const sanitizedLabel = String(qg.label).replace(/,/g, ' /').replace(/"/g, '""');
+    const sanitizedLabel = labelDisplay.replace(/"/g, '""');
     const istCell = ws.getCell(r, startCol + 2);
     istCell.value = {
       formula: `COUNTIF(${qgColLetter}${tnStart}:${qgColLetter}${tnEnd},"${sanitizedLabel}")`,
@@ -2056,92 +2195,119 @@ function writeQuestionColumn(ws, col, label, note, antList, quoteText, tnEnd, gr
 // 4) HAUPT-FILL-LOGIK
 // ---------------------------------------------------------------------------
 
-// v11: IDI-Profile, Segment-Beschreibungen und Studien-Quoten in Spalte G ausspielen
+// v12.22.15: QG-Box in Spalte G unter dem TN-Bereich rendern.
+// Frueher hat diese Funktion Segment-Beschreibungen, IDI-Profile und Studien-
+// Quoten dort gerendert. Auf User-Wunsch (Image 2 vom 17.05.) ersetzen wir
+// das durch den QG-Counter (Quotengruppe / Soll / Ist / Status).
 //
-// Layout im JPM-Vorbild:
-//   Z22+ Spalte G: Segment-Beschreibungen untereinander
-//     "Segment 1 — Ambitious Maximisers"
-//     "Jüngere bis mittlere Altersgruppe (18-50)"
-//     "Eltern, die Vollzeit arbeiten"
-//     "..."
-//     (leere Zeile)
-//     "Segment 2 — Experienced Optimisers"
-//     "..."
+// Layout:
+//   Z(tnEnd+8) Spalte G: "Quotengruppen-Counter" (Header)
+//   Z(tnEnd+9): | Quotengruppe | Soll | Ist | Status |
+//   Z(tnEnd+10+i): Daten-Zeile pro QG mit COUNTIF
 //
-// Die studien_quoten werden ans Ende angehängt unter Überschrift "Studien-Quoten".
-function writeIdiInfoBlock(ws, opts) {
-  const { idiProfile, segment_beschreibungen, studien_quoten, tnEnd } = opts;
-  if (!segment_beschreibungen && !studien_quoten?.length && !idiProfile?.length) return;
+// Segmente und Studien-Quoten kommen nicht mehr ins Sheet — der Recruiter
+// findet sie ohnehin in der Quotenübersicht (Sheet 1).
+function writeQgBoxUnderTn(ws, qgList, qgColLetter, tnStart, tnEnd) {
+  if (!Array.isArray(qgList) || qgList.length < 2) return;
 
-  // Spalte G ist im IDI-Sheet "Feedback zum TN" — dort schreiben
   const col = 7; // G
-  let row = tnEnd + 8; // genug Abstand zu TN-Daten und Quote-Hinweisen
-
-  ws.getColumn(col).width = Math.max(ws.getColumn(col).width || 20, 30);
-
-  // 1) Segment-Beschreibungen
-  if (segment_beschreibungen && Object.keys(segment_beschreibungen).length > 0) {
-    let segIdx = 1;
-    for (const [name, desc] of Object.entries(segment_beschreibungen)) {
-      const headerCell = ws.getCell(row, col);
-      headerCell.value = `Segment ${segIdx} — ${name}`;
-      headerCell.font = { name: 'Arial', size: 10, bold: true, color: { argb: 'FF1F4E79' } };
-      headerCell.alignment = { wrapText: true, vertical: 'middle' };
-      row++;
-      // Beschreibung (kann mehrzeilig sein)
-      const descCell = ws.getCell(row, col);
-      descCell.value = String(desc);
-      descCell.font = { name: 'Arial', size: 9 };
-      descCell.alignment = { wrapText: true, vertical: 'middle' };
-      const lineCount = String(desc).split('\n').length;
-      ws.getRow(row).height = Math.min(15 + lineCount * 14, 200);
-      row++;
-      // Leere Zeile als Trenner
-      row++;
-      segIdx++;
+  ws.getColumn(col).width = Math.max(ws.getColumn(col).width || 20, 32);
+  // Spalten H, I, J fuer Soll/Ist/Status sicherstellen
+  for (let dc = 0; dc < 4; dc++) {
+    if (!ws.getColumn(col + dc).width || ws.getColumn(col + dc).width < 8) {
+      ws.getColumn(col + dc).width = dc === 0 ? 32 : 10;
     }
   }
 
-  // 2) IDI-Profile (wenn idiProfile-Liste vorhanden)
-  if (Array.isArray(idiProfile) && idiProfile.length > 0) {
-    const headerCell = ws.getCell(row, col);
-    headerCell.value = `IDI-Profile (${idiProfile.length} Interviews)`;
-    headerCell.font = { name: 'Arial', size: 10, bold: true, color: { argb: 'FF1F4E79' } };
-    row++;
-    for (const p of idiProfile) {
-      const segLabel = p.segment_oder?.length
-        ? `${p.segment} (oder ${p.segment_oder.join(', ')})`
-        : p.segment;
-      const profileText = `${p.id}: ${segLabel}` +
-        (p.cluster ? ` — ${p.cluster}` : '') +
-        (p.profile_quoten?.length
-          ? '\n  ' + p.profile_quoten.map(q => `• ${q.text}`).join('\n  ')
-          : '');
-      const c = ws.getCell(row, col);
-      c.value = profileText;
-      c.font = { name: 'Arial', size: 9 };
-      c.alignment = { wrapText: true, vertical: 'middle' };
-      const lc = profileText.split('\n').length;
-      ws.getRow(row).height = Math.min(15 + lc * 14, 150);
-      row++;
-    }
-    row++; // Trenner
+  const startRow = tnEnd + 8;
+
+  // Header
+  const h1 = ws.getCell(startRow, col);
+  h1.value = 'Quotengruppen-Counter';
+  h1.font = { name: 'Arial', size: 11, bold: true, color: { argb: 'FF1F4E79' } };
+  h1.alignment = { vertical: 'middle', horizontal: 'left' };
+  // Subheader-Zeile mit Spalten-Labels
+  const subRow = startRow + 1;
+  const subHeaders = ['Quotengruppe', 'Soll', 'Ist', 'Status'];
+  const fillHeader = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFEAF1F8' } };
+  const thinGrey = { style: 'thin', color: { argb: 'FFB8C5D6' } };
+  for (let i = 0; i < 4; i++) {
+    const c = ws.getCell(subRow, col + i);
+    c.value = subHeaders[i];
+    c.font = { name: 'Arial', size: 10, bold: true, color: { argb: 'FF1F4E79' } };
+    c.alignment = { vertical: 'middle', horizontal: i === 0 ? 'left' : 'center' };
+    c.fill = fillHeader;
+    c.border = { top: thinGrey, bottom: thinGrey, left: thinGrey, right: thinGrey };
   }
 
-  // 3) Studien-Quoten (gelten studienweit)
-  if (Array.isArray(studien_quoten) && studien_quoten.length > 0) {
-    const headerCell = ws.getCell(row, col);
-    headerCell.value = 'Studien-Quoten (gelten für alle TN)';
-    headerCell.font = { name: 'Arial', size: 10, bold: true, color: { argb: 'FF1F4E79' } };
-    row++;
-    for (const q of studien_quoten) {
-      const c = ws.getCell(row, col);
-      c.value = `• ${q}`;
-      c.font = { name: 'Arial', size: 9 };
-      c.alignment = { wrapText: true, vertical: 'middle' };
-      row++;
-    }
-  }
+  // Daten-Zeilen
+  const fillBox = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF7FAFC' } };
+  qgList.forEach((qg, idx) => {
+    const r = subRow + 1 + idx;
+    const labelDisplay = String(qg.label).replace(/,/g, ' /');
+
+    const labelCell = ws.getCell(r, col);
+    labelCell.value = labelDisplay;
+    labelCell.font = { name: 'Arial', size: 10 };
+    labelCell.alignment = { vertical: 'middle', horizontal: 'left', wrapText: true };
+    labelCell.fill = fillBox;
+    labelCell.border = { top: thinGrey, bottom: thinGrey, left: thinGrey, right: thinGrey };
+
+    const sollCell = ws.getCell(r, col + 1);
+    sollCell.value = qg.n_target;
+    sollCell.font = { name: 'Arial', size: 10, bold: true };
+    sollCell.alignment = { vertical: 'middle', horizontal: 'center' };
+    sollCell.fill = fillBox;
+    sollCell.border = { top: thinGrey, bottom: thinGrey, left: thinGrey, right: thinGrey };
+
+    const sanitizedLabel = labelDisplay.replace(/"/g, '""');
+    const istCell = ws.getCell(r, col + 2);
+    istCell.value = {
+      formula: `COUNTIF(${qgColLetter}${tnStart}:${qgColLetter}${tnEnd},"${sanitizedLabel}")`,
+    };
+    istCell.font = { name: 'Arial', size: 10, bold: true };
+    istCell.alignment = { vertical: 'middle', horizontal: 'center' };
+    istCell.fill = fillBox;
+    istCell.border = { top: thinGrey, bottom: thinGrey, left: thinGrey, right: thinGrey };
+
+    const statusCell = ws.getCell(r, col + 3);
+    statusCell.value = '';
+    statusCell.alignment = { vertical: 'middle', horizontal: 'center' };
+    statusCell.fill = fillBox;
+    statusCell.border = { top: thinGrey, bottom: thinGrey, left: thinGrey, right: thinGrey };
+  });
+
+  // Bedingte Formatierung pro Status-Zelle (Ampel)
+  qgList.forEach((qg, idx) => {
+    const r = subRow + 1 + idx;
+    const colLetter = columnNumberToLetter(col + 3);
+    const sollRef = `${columnNumberToLetter(col + 1)}${r}`;
+    const istRef  = `${columnNumberToLetter(col + 2)}${r}`;
+    const statusRef = `${colLetter}${r}`;
+    ws.addConditionalFormatting({
+      ref: statusRef,
+      rules: [
+        { type: 'expression', priority: 1, formulae: [`${istRef}=${sollRef}`],
+          style: { fill: { type: 'pattern', pattern: 'solid', bgColor: { argb: 'FFA9D08E' } } } },
+        { type: 'expression', priority: 2, formulae: [`${istRef}>${sollRef}`],
+          style: { fill: { type: 'pattern', pattern: 'solid', bgColor: { argb: 'FFFFC7CE' } } } },
+        { type: 'expression', priority: 3, formulae: [`AND(${istRef}>0,${istRef}<${sollRef})`],
+          style: { fill: { type: 'pattern', pattern: 'solid', bgColor: { argb: 'FFFFEB9C' } } } },
+      ],
+    });
+  });
+}
+
+// ============================================================================
+// LEGACY: writeIdiInfoBlock (entfernt zugunsten writeQgBoxUnderTn, v12.22.15).
+// Falls noch Aufrufe existieren -> No-Op, damit nichts crasht.
+// ============================================================================
+function writeIdiInfoBlock(ws, opts) {
+  // v12.22.15: Funktion ist deaktiviert. Segmente, IDI-Profile und Studien-
+  // Quoten werden NICHT mehr in den Sheet-Body geschrieben — sie bleiben in
+  // der Quotenübersicht (Sheet 1) und im Hardening-Output. Im Sheet selbst
+  // steht jetzt nur der QG-Counter (siehe writeQgBoxUnderTn).
+  return;
 }
 
 // v11: Frage-Header-Label bauen.
@@ -3767,16 +3933,8 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
   ws.getRow(MATRIX_HEADER_ROW).height = 32;
   ws.getRow(HEADER_ROW).height = 75;
 
-  // v11: IDI-Profile, Segment-Beschreibungen und Studien-Quoten in Spalte G ausspielen
-  // (wenn vorhanden in opts)
-  if (opts.idiProfile || opts.segment_beschreibungen || opts.studien_quoten) {
-    writeIdiInfoBlock(ws, {
-      idiProfile: opts.idiProfile,
-      segment_beschreibungen: opts.segment_beschreibungen,
-      studien_quoten: opts.studien_quoten,
-      tnEnd,
-    });
-  }
+  // v12.22.15: writeIdiInfoBlock entfernt - QG-Box ersetzt Segmente/IDI-Profile/Studien-Quoten
+  // in Spalte G. Aufruf erfolgt nun unten im QG-Block via writeQgBoxUnderTn.
 
   // Freeze Panes komplett deaktiviert — User scrollt frei in alle Richtungen
   ws.views = [{ state: 'normal' }];
@@ -3807,20 +3965,11 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
         // Mehrere QGs → Dropdown + Übersichts-Box
         const qgLabels = qgList.map(q => q.label);
         applyQuotengruppenDropdown(ws, qgCol, qgLabels, TN_START, tnEnd);
-        // v12.22.11: Box-Position abhaengig von QG-Anzahl. Box laeuft von Z1
-        // bis Z(qgList.length + 1). Ab 5 QGs kollidiert sie mit der Frage-
-        // Header-Zeile (HEADER_ROW=6). Dann nach rechts hinter den letzten
-        // Frage-Bereich verschieben, sonst bleibt sie an quoteStartCol (=
-        // direkt ueber den Antwort-Spalten, kompakt).
-        const wouldCollide = (qgList.length + 1) >= HEADER_ROW;
-        const boxStartCol = wouldCollide ? (currentCol + 1) : quoteStartCol;
-        if (wouldCollide) {
-          dbg.boxPosition = { reason: 'avoid_collision_with_header_row',
-            qgCount: qgList.length, movedToCol: boxStartCol,
-            originalCol: quoteStartCol };
-        }
-        renderQuotenUebersicht(ws, qgList, boxStartCol, qgColLetter, TN_START, tnEnd);
-        dbg.action = 'rendered_dropdown_and_box';
+        // v12.22.15: QG-Box jetzt unten in Spalte G (statt oben in Z1-Z4 oder
+        // ganz rechts in BG). Recruiter findet sie unter dem TN-Bereich wo
+        // frueher die Segment/Studien-Quoten-Liste stand.
+        writeQgBoxUnderTn(ws, qgList, qgColLetter, TN_START, tnEnd);
+        dbg.action = 'rendered_dropdown_and_box_under_tn';
       } else {
         // v12.22.8: Bei nur 1 QG die Spalte NICHT mehr ausblenden — sonst kollabiert
         // die Spalte unter dem Logo-Bereich und das Logo wird verzerrt dargestellt.
@@ -4106,7 +4255,7 @@ export default async function handler(req, res) {
         laufzeitBis: builderOptions.laufzeitBis,
         // v12.22.1: Quotengruppen-Debug pro Sheet
         qgDebug: globalThis.__QG_DEBUG__ || [],
-        version: 'v12.22.12-idi-ntarget',
+        version: 'v12.22.15-qg-box-under-tn',
       },
     });
   } catch (err) {
@@ -4119,7 +4268,7 @@ export default async function handler(req, res) {
       errorType: err?.name || 'Error',
       stack: err?.stack ? String(err.stack).split('\n').slice(0, 8) : null,
       qgDebug: globalThis.__QG_DEBUG__ || [],
-      version: 'v12.22.12-idi-ntarget',
+      version: 'v12.22.15-qg-box-under-tn',
     });
   }
 }
