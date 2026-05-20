@@ -116,6 +116,42 @@
 //   das fehlt, auf Spalten-Berechnung zurückfallen. EMU↔Pixel-Umrechnung
 //   per Heuristik (Werte >10000 = EMU).
 //
+// v12.22.20 (20.05.2026): DEAD-CODE-CLEANUP
+// - Drei Funktionen entfernt die seit v12.22.15 nicht mehr aufgerufen wurden:
+//   * renderQuotenUebersicht (vertikale QG-Box, ersetzt durch writeQgBoxUnderTn)
+//   * renderQuotenUebersichtHorizontal (horizontale QG-Box, v12.22.14-Experiment)
+//   * writeIdiInfoBlock (No-Op-Stub, war Segment/IDI-Liste/Studien-Quoten-Renderer)
+// - Reduziert die Datei um ~230 Zeilen. Keine funktionale Aenderung.
+//
+// v12.22.19 (20.05.2026): LAYOUT-KONSISTENZ-PASS (PRE-DEPLOY-AUDIT)
+// - User-Hinweis: doppelte/veraltete Anweisungen zu Logo, Frage-Header,
+//   TN-Start im Code pruefen. Diese Version: keine funktionalen Aenderungen,
+//   nur Cleanups.
+// - Audit-Ergebnisse:
+//   * Layout-Konstanten (TN_START, HEADER_ROW, LONG_QUESTION_ROW,
+//     MATRIX_HEADER_ROW) konsequent ueberall referenziert — KEIN hardcoded
+//     Z6/Z7 im Code.
+//   * Logo-Pipeline: ein-Weg-Pfad, kein Doppel-Add (copyWorksheet kopiert
+//     Vorlagen-Logo, addLogo greift nur als Fallback bei _templateLogoCopied=false).
+//   * Frage-Header: writeQuestionColumn ist die EINZIGE Stelle die Z6+Z7
+//     beschreibt (Frage-Text + Kurzlabel).
+//   * Veraltete Kommentare/Variable-Namen (row6 → headerRow) aktualisiert.
+//   * Beispiel-Zelladressen in DV-Kommentaren von Z7→Z8 angepasst.
+//
+// v12.22.18 (20.05.2026): VOLLE SCREENER-FRAGE IN Z6 (STRUKTURELLE LOESUNG)
+// - Templates wurden angepasst: alle 6 Vorlagen (offline/online x F_T/HG/ms)
+//   haben jetzt eine zusaetzliche leere Zeile zwischen Matrix-Header (Z5)
+//   und TN-Tabellen-Header (Z7 alt 6).
+// - Konstanten-Verschiebung:
+//   Z5 = MATRIX_HEADER_ROW (unveraendert)
+//   Z6 = LONG_QUESTION_ROW (NEU - lange Screener-Frage)
+//   Z7 = HEADER_ROW (war 6 - Kurzlabel + Tabellen-Header)
+//   Z8 = TN_START (war 7 - erste TN-Zeile)
+// - writeQuestionColumn schreibt volle frage.fragetext in Z6 (Smart-Suppression
+//   bei Matrix-Items + Redundanz mit kurz_label).
+// - Layout-stabil: keine spliceRows-Tricks, keine Bild-Anchor-Manipulation.
+//   Templates und Code wachsen synchron.
+//
 // v12.22.17 (20.05.2026): REVERT v12.22.16 (Z4-FRAGE)
 // - Problem: v12.22.16 hat lange Fragen in Z4 geschrieben + Z4-Hoehe auf
 //   60pt erhoeht. Bei VGD-Templates mit Sheet-Header bis Spalte M und Logo
@@ -124,8 +160,8 @@
 //   I4 'F&T Projekt-Nr.', L4 'Incentive').
 // - Fix: Z4-Frage-Block aus writeQuestionColumn entfernt, Z4-Hoehe nicht
 //   mehr veraendert. Layout identisch zu v12.22.15.
-// - LONG_QUESTION_ROW-Konstante bleibt deklariert (ungenutzt), falls
-//   spaeter eine sauberere Tooltip-Variante kommt.
+// - (Veraltet seit v12.22.18: LONG_QUESTION_ROW wieder aktiv, jetzt aber
+//   in Z6 mit Template-Unterstuetzung statt Z4-Quick-Fix.)
 //
 // v12.22.16 (17.05.2026): VOLLE SCREENER-FRAGE IN Z4 (LONG_QUESTION_ROW) — REVERTED
 //
@@ -135,14 +171,12 @@
 //   Recruiter sieht ihn direkt nach dem Scrollen unter den letzten TN-Zeilen.
 // - Segment-Beschreibungen, IDI-Profile und Studien-Quoten werden NICHT mehr
 //   im Sheet-Body angezeigt — der Recruiter findet sie in der Quotenübersicht
-//   (Sheet 1). writeIdiInfoBlock ist No-Op.
+//   (Sheet 1). writeIdiInfoBlock entfernt (v12.22.20).
 // - QG-Box-Layout (Z(tnEnd+8) abwaerts ab Spalte G):
 //     Row 1: "Quotengruppen-Counter" (Titel)
 //     Row 2: | Quotengruppe | Soll | Ist | Status |
 //     Row 3+: Daten-Zeile pro QG mit COUNTIF + Ampel
-// - Horizontale Box-Variante (v12.22.14) entfernt — nur noch ein Box-Stil
-//   unter TN. renderQuotenUebersicht bleibt als Funktion da fuer Backward-
-//   Kompatibilitaet, wird aber nicht mehr aufgerufen.
+// - Horizontale Box-Variante (v12.22.14) entfernt (v12.22.20).
 //
 // v12.22.14 (17.05.2026): HORIZONTALES QG-BOX-LAYOUT BEI VIELEN QGs
 // - User-Feedback: bei v12.22.11 wurde die QG-Box bei ≥5 QGs nach rechts
@@ -342,10 +376,17 @@ function detectHeaderPositions(ws) {
   return found;
 }
 
-const TN_START = 7;
+// v12.22.18: Template hat jetzt eine zusaetzliche leere Zeile (Z6) zwischen
+// Matrix-Header (Z5) und Tabellen-Header (Z7). Damit wandern alle Layout-
+// Zeilen um 1 runter:
+//   Z5 = MATRIX_HEADER_ROW (unveraendert)
+//   Z6 = LONG_QUESTION_ROW (NEU - lange Screener-Frage)
+//   Z7 = HEADER_ROW (war Z6 - Kurzlabel + Tabellen-Header)
+//   Z8 = TN_START (war Z7 - erste TN-Zeile)
+const TN_START = 8;
 const MATRIX_HEADER_ROW = 5;
-const HEADER_ROW = 6;
-const LONG_QUESTION_ROW = 4;  // v12.22.16: volle Screener-Frage (italic, klein) ueber dem Matrix-Header
+const LONG_QUESTION_ROW = 6;
+const HEADER_ROW = 7;
 const QUOTE_HINT_AFTER_TN_OFFSET = 1;  // "X für Y"-Label = TN_END + 1
 const ANT_OFFSET = 2;                  // Antworten beginnen TN_END + 2
 
@@ -628,11 +669,11 @@ function computeImagePixelSize(srcWs, tl, br) {
   return { width: widthPx, height: heightPx };
 }
 
-// Findet die erste "Quote"-Spalte in Zeile 6 dynamisch
+// Findet die erste "Quote"-Spalte in HEADER_ROW (Z7) dynamisch
 function findQuoteStartCol(ws, fallback) {
-  const row6 = ws.getRow(HEADER_ROW);
+  const headerRow = ws.getRow(HEADER_ROW);
   let foundCol = null;
-  row6.eachCell({ includeEmpty: false }, (cell, colNum) => {
+  headerRow.eachCell({ includeEmpty: false }, (cell, colNum) => {
     if (foundCol !== null) return;
     const v = String(cell.value ?? '').trim();
     if (/^Quote\b/i.test(v)) foundCol = colNum;
@@ -656,13 +697,13 @@ function findQuoteStartCol(ws, fallback) {
 //                                 ableiten (1 QG pro Segment-Profil)
 //   3) gruppe.zielgruppe        — Fallback: 1 QG, label = zielgruppe, n = brutto
 
-// Findet die Spalte mit Header "Quotengruppe" in Z6.
+// Findet die Spalte mit Header "Quotengruppe" in HEADER_ROW (Z7).
 // Rückgabe: Spalten-Nummer oder null wenn nicht vorhanden (alte Vorlage).
 // v12.22.1: robuster gegen RichText/Formula-Werte — nutzt cell.text als Fallback
 function findQuotengruppenCol(ws) {
-  const row6 = ws.getRow(HEADER_ROW);
+  const headerRow = ws.getRow(HEADER_ROW);
   let foundCol = null;
-  row6.eachCell({ includeEmpty: false }, (cell, colNum) => {
+  headerRow.eachCell({ includeEmpty: false }, (cell, colNum) => {
     if (foundCol !== null) return;
     let v = '';
     // 1) cell.text ist die kanonische Plain-Text-Repräsentation in ExcelJS
@@ -1224,223 +1265,10 @@ function applyQuotengruppenDropdown(ws, qgCol, qgLabels, tnStart, tnEnd) {
   ws.addConditionalFormatting({ ref: range, rules });
 }
 
-// Horizontales Layout der QG-Box: passt in Z1-Z4 ueber den Frage-Spalten.
-// Z1: QG-Label (eine Spalte pro QG)
-// Z2: Soll
-// Z3: Ist (=COUNTIF)
-// Z4: Ampel (Conditional Formatting)
-// Spannweite: startCol .. startCol + N - 1 (N = qgList.length)
-function renderQuotenUebersichtHorizontal(ws, qgList, startCol, qgColLetter, tnStart, tnEnd) {
-  const thinGrey = { style: 'thin', color: { argb: 'FFB8C5D6' } };
-  const fillBox = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFEAF1F8' } };
+// v12.22.20: renderQuotenUebersicht + renderQuotenUebersichtHorizontal
+// entfernt. Beide Funktionen waren seit v12.22.15 (Wechsel auf
+// writeQgBoxUnderTn unter dem TN-Bereich in Spalte G) dead code.
 
-  // Optional: linke Beschriftung wenn Platz ist (startCol-1)
-  // Schreiben "Quotengruppe" / "Soll" / "Ist" / "Status" als Zeilen-Labels
-  // nur wenn startCol > 1 — sonst weglassen.
-  if (startCol > 1) {
-    const labelCol = startCol - 1;
-    const rowLabels = ['Quotengruppe', 'Soll', 'Ist', 'Status'];
-    for (let i = 0; i < 4; i++) {
-      const c = ws.getCell(i + 1, labelCol);
-      c.value = rowLabels[i];
-      c.font = { name: 'Arial', size: 9, bold: true, italic: true, color: { argb: 'FF1F4E79' } };
-      c.alignment = { vertical: 'middle', horizontal: 'right' };
-    }
-  }
-
-  qgList.forEach((qg, idx) => {
-    const col = startCol + idx;
-    const labelDisplay = String(qg.label).replace(/,/g, ' /');
-    // Z1: Label (vertikal angeordnet zur Platzersparnis, leicht gedreht waere noch besser)
-    const labelCell = ws.getCell(1, col);
-    labelCell.value = labelDisplay;
-    labelCell.font = { name: 'Arial', size: 8, bold: true, color: { argb: 'FF1F4E79' } };
-    labelCell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true, textRotation: 0 };
-    labelCell.fill = fillBox;
-    labelCell.border = { top: thinGrey, bottom: thinGrey, left: thinGrey, right: thinGrey };
-
-    // Z2: Soll
-    const sollCell = ws.getCell(2, col);
-    sollCell.value = qg.n_target;
-    sollCell.font = { name: 'Arial', size: 10, bold: true };
-    sollCell.alignment = { vertical: 'middle', horizontal: 'center' };
-    sollCell.fill = fillBox;
-    sollCell.border = { top: thinGrey, bottom: thinGrey, left: thinGrey, right: thinGrey };
-
-    // Z3: Ist (COUNTIF)
-    const sanitizedLabel = labelDisplay.replace(/"/g, '""');
-    const istCell = ws.getCell(3, col);
-    istCell.value = {
-      formula: `COUNTIF(${qgColLetter}${tnStart}:${qgColLetter}${tnEnd},"${sanitizedLabel}")`,
-    };
-    istCell.font = { name: 'Arial', size: 10, bold: true };
-    istCell.alignment = { vertical: 'middle', horizontal: 'center' };
-    istCell.fill = fillBox;
-    istCell.border = { top: thinGrey, bottom: thinGrey, left: thinGrey, right: thinGrey };
-
-    // Z4: Status-Zelle fuer Ampel
-    const statusCell = ws.getCell(4, col);
-    statusCell.value = '';
-    statusCell.alignment = { vertical: 'middle', horizontal: 'center' };
-    statusCell.border = { top: thinGrey, bottom: thinGrey, left: thinGrey, right: thinGrey };
-  });
-
-  // Spaltenbreite leicht reduzieren fuer kompaktes Layout (~14)
-  for (let idx = 0; idx < qgList.length; idx++) {
-    const col = startCol + idx;
-    const existing = ws.getColumn(col).width;
-    if (!existing || existing > 16) ws.getColumn(col).width = 14;
-  }
-
-  // Bedingte Formatierung pro QG-Status-Zelle (Z4) — Ampel basierend auf Z2/Z3
-  const sollRow = 2, istRow = 3, statusRow = 4;
-  qgList.forEach((qg, idx) => {
-    const col = startCol + idx;
-    const colLetter = columnNumberToLetter(col);
-    const statusRef = `${colLetter}${statusRow}`;
-    const sollRef = `${colLetter}${sollRow}`;
-    const istRef  = `${colLetter}${istRow}`;
-    ws.addConditionalFormatting({
-      ref: statusRef,
-      rules: [
-        { type: 'expression', priority: 1, formulae: [`${istRef}=${sollRef}`],
-          style: { fill: { type: 'pattern', pattern: 'solid', bgColor: { argb: 'FFA9D08E' } } } },
-        { type: 'expression', priority: 2, formulae: [`${istRef}>${sollRef}`],
-          style: { fill: { type: 'pattern', pattern: 'solid', bgColor: { argb: 'FFFFC7CE' } } } },
-        { type: 'expression', priority: 3, formulae: [`AND(${istRef}>0,${istRef}<${sollRef})`],
-          style: { fill: { type: 'pattern', pattern: 'solid', bgColor: { argb: 'FFFFEB9C' } } } },
-      ],
-    });
-  });
-}
-
-// Schreibt die Quoten-Übersichts-Box ab Spalte quoteStartCol.
-// v12.22.14: Zwei Layout-Varianten je nach QG-Anzahl:
-//   - VERTIKAL (≤4 QGs): Z1=Headers, Z2..Z(1+N)=Daten — 4 Spalten breit
-//     [Quotengruppe | Soll | Ist | Status]
-//   - HORIZONTAL (≥5 QGs): Z1=Labels (eine pro Spalte), Z2=Soll, Z3=Ist,
-//     Z4=Status (Ampel). Spannweite = N Spalten ab quoteStartCol.
-//     Bleibt immer in Zeilen 1-4, kollidiert nicht mit HEADER_ROW=6.
-function renderQuotenUebersicht(ws, qgList, quoteStartCol, qgColLetter, tnStart, tnEnd) {
-  if (!Array.isArray(qgList) || qgList.length === 0 || !quoteStartCol) return;
-  const startCol = quoteStartCol;
-  const horizontalLayout = qgList.length >= 5;
-  if (horizontalLayout) {
-    return renderQuotenUebersichtHorizontal(ws, qgList, startCol, qgColLetter, tnStart, tnEnd);
-  }
-  // ---- VERTIKAL (≤4 QGs, klassisches Layout) ----
-  // Z1: Header-Zeile
-  const h1 = ws.getCell(1, startCol);
-  h1.value = 'Quotengruppe';
-  h1.font = { name: 'Arial', size: 10, bold: true, color: { argb: 'FF1F4E79' } };
-  h1.alignment = { vertical: 'middle', horizontal: 'left', wrapText: true };
-
-  const h2 = ws.getCell(1, startCol + 1);
-  h2.value = 'Soll';
-  h2.font = { name: 'Arial', size: 10, bold: true, color: { argb: 'FF1F4E79' } };
-  h2.alignment = { vertical: 'middle', horizontal: 'center' };
-
-  const h3 = ws.getCell(1, startCol + 2);
-  h3.value = 'Ist';
-  h3.font = { name: 'Arial', size: 10, bold: true, color: { argb: 'FF1F4E79' } };
-  h3.alignment = { vertical: 'middle', horizontal: 'center' };
-
-  const h4 = ws.getCell(1, startCol + 3);
-  h4.value = '';
-  h4.font = { name: 'Arial', size: 10, bold: true };
-
-  // Hintergrund-Färbung für Box (helles Blau)
-  const fillBox = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFEAF1F8' } };
-  const thinGrey = { style: 'thin', color: { argb: 'FFB8C5D6' } };
-
-  for (let c = 0; c < 4; c++) {
-    const cell = ws.getCell(1, startCol + c);
-    cell.fill = fillBox;
-    cell.border = { top: thinGrey, bottom: thinGrey, left: thinGrey, right: thinGrey };
-  }
-
-  // Daten-Zeilen ab Z2
-  qgList.forEach((qg, idx) => {
-    const r = 2 + idx;
-    // v12.22.13: Label im Box-Anzeigetext, Dropdown und COUNTIF MUSS identisch
-    // sein, sonst sucht COUNTIF einen String den Excel im Dropdown nie schreibt.
-    // applyQuotengruppenDropdown ersetzt Komma->/ (weil Komma die Excel-Liste
-    // zerreissen wuerde). Box und COUNTIF muessen genau das gleiche Format
-    // verwenden.
-    const labelDisplay = String(qg.label).replace(/,/g, ' /');
-    const labelCell = ws.getCell(r, startCol);
-    labelCell.value = labelDisplay;
-    labelCell.font = { name: 'Arial', size: 9 };
-    labelCell.alignment = { vertical: 'middle', horizontal: 'left', wrapText: true };
-
-    const sollCell = ws.getCell(r, startCol + 1);
-    sollCell.value = qg.n_target;
-    sollCell.font = { name: 'Arial', size: 9 };
-    sollCell.alignment = { vertical: 'middle', horizontal: 'center' };
-
-    // COUNTIF Formel auf die QG-Spalte F (qgColLetter) im TN-Bereich
-    const sanitizedLabel = labelDisplay.replace(/"/g, '""');
-    const istCell = ws.getCell(r, startCol + 2);
-    istCell.value = {
-      formula: `COUNTIF(${qgColLetter}${tnStart}:${qgColLetter}${tnEnd},"${sanitizedLabel}")`,
-    };
-    istCell.font = { name: 'Arial', size: 9 };
-    istCell.alignment = { vertical: 'middle', horizontal: 'center' };
-
-    const statusCell = ws.getCell(r, startCol + 3);
-    statusCell.value = '';  // wird per bedingter Formatierung gefärbt
-    statusCell.alignment = { vertical: 'middle', horizontal: 'center' };
-
-    // Border und Fill für Daten-Zeile
-    for (let c = 0; c < 4; c++) {
-      const cell = ws.getCell(r, startCol + c);
-      cell.border = { top: thinGrey, bottom: thinGrey, left: thinGrey, right: thinGrey };
-      if (c !== 3) cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFFFFF' } };
-    }
-  });
-
-  // Bedingte Formatierung für Status-Spalte (Ampel)
-  const lastDataRow = 1 + qgList.length;
-  const sollColLetter = columnNumberToLetter(startCol + 1);
-  const istColLetter  = columnNumberToLetter(startCol + 2);
-  const statusColLetter = columnNumberToLetter(startCol + 3);
-
-  // Grün wenn Ist = Soll
-  ws.addConditionalFormatting({
-    ref: `${statusColLetter}2:${statusColLetter}${lastDataRow}`,
-    rules: [
-      {
-        type: 'expression',
-        priority: 1,
-        formulae: [`$${istColLetter}2=$${sollColLetter}2`],
-        style: { fill: { type: 'pattern', pattern: 'solid', bgColor: { argb: 'FFA9D08E' } } },
-      },
-      // Rot wenn Ist > Soll
-      {
-        type: 'expression',
-        priority: 2,
-        formulae: [`$${istColLetter}2>$${sollColLetter}2`],
-        style: { fill: { type: 'pattern', pattern: 'solid', bgColor: { argb: 'FFFFC7CE' } } },
-      },
-      // Gelb wenn 0 < Ist < Soll
-      {
-        type: 'expression',
-        priority: 3,
-        formulae: [`AND($${istColLetter}2>0,$${istColLetter}2<$${sollColLetter}2)`],
-        style: { fill: { type: 'pattern', pattern: 'solid', bgColor: { argb: 'FFFFE699' } } },
-      },
-    ],
-  });
-
-  // Spaltenbreiten anpassen (nur erweitern, nicht verkleinern)
-  const colWidths = [32, 8, 8, 4];
-  for (let c = 0; c < 4; c++) {
-    const col = ws.getColumn(startCol + c);
-    if (!col.width || col.width < colWidths[c]) col.width = colWidths[c];
-  }
-}
-
-// Wandelt eine Spalten-Nummer (1-basiert) in den Buchstaben um (A, B, ..., AA).
 function columnNumberToLetter(n) {
   let s = '';
   while (n > 0) {
@@ -1535,12 +1363,12 @@ function addLogo(dstWs, dstWorkbook, unternehmen, setting) {
   }
 }
 
-// Findet dynamisch die "lfd. Nr."-Spalte im Template (Zeile 6).
+// Findet dynamisch die "lfd. Nr."-Spalte im Template (HEADER_ROW = Z7).
 // Offline = Spalte E (5), Online = Spalte F (6) — variiert je nach Template.
 function findLfdNrCol(ws, fallback) {
-  const row6 = ws.getRow(HEADER_ROW);
+  const headerRow = ws.getRow(HEADER_ROW);
   let foundCol = null;
-  row6.eachCell({ includeEmpty: false }, (cell, colNum) => {
+  headerRow.eachCell({ includeEmpty: false }, (cell, colNum) => {
     if (foundCol !== null) return;
     const v = String(cell.value ?? '').trim().toLowerCase();
     if (v === 'lfd. nr.' || v === 'lfd.nr.' || v === 'lfd nr.' || v.startsWith('lfd')) {
@@ -1550,12 +1378,12 @@ function findLfdNrCol(ws, fallback) {
   return foundCol || fallback;
 }
 
-// v11.4: Findet Spalten-Indizes für Datum / Uhrzeit-Spalten in Z6
+// v11.4: Findet Spalten-Indizes für Datum / Uhrzeit-Spalten in HEADER_ROW (Z7)
 // Liefert {datum, uhrzeit} mit Spalten-Indizes (1-basiert) oder null
 function findDatumUhrzeitCols(ws) {
-  const row6 = ws.getRow(HEADER_ROW);
+  const headerRow = ws.getRow(HEADER_ROW);
   let datumCol = null, uhrzeitCol = null;
-  row6.eachCell({ includeEmpty: false }, (cell, colNum) => {
+  headerRow.eachCell({ includeEmpty: false }, (cell, colNum) => {
     const v = String(cell.value ?? '').trim().toLowerCase();
     if (datumCol === null && /^(datum|date)$/i.test(v)) datumCol = colNum;
     if (uhrzeitCol === null && /^(uhrzeit|zeit|time)$/i.test(v)) uhrzeitCol = colNum;
@@ -2114,6 +1942,23 @@ function writeQuestionColumn(ws, col, label, note, antList, quoteText, tnEnd, gr
   const showFragetextInHeader = isToolInputId && ftClean.length > 20 &&
     ftClean.toLowerCase() !== krzClean.toLowerCase();
 
+  // v12.22.18: Volle Screener-Frage in Z6 (LONG_QUESTION_ROW). Template hat
+  // Z6 fuer diese Zeile vorbereitet (zwischen MATRIX_HEADER_ROW=5 und
+  // HEADER_ROW=7). Smart-Suppression:
+  //   - Bei Matrix-Item-Spalten: leer (Mutter-Frage steht in Z5 gemerged)
+  //   - Wenn fragetext == kurz_label oder leer: leer
+  const isMatrixItemColumn = Array.isArray(frage && frage.items) && frage.items.length > 0
+    && label !== (frage.kurz_label || frage.kurzlabel)
+    && label !== (frage.fragetext || '');
+  if (!isMatrixItemColumn && ftClean && ftClean.length > 0
+      && ftClean.toLowerCase() !== krzClean.toLowerCase()) {
+    const longQCell = ws.getCell(LONG_QUESTION_ROW, col);
+    longQCell.value = ftClean;
+    longQCell.font = { name: 'Arial', size: 9, italic: true, color: { argb: 'FF555555' } };
+    longQCell.alignment = { horizontal: 'left', vertical: 'top', wrapText: true };
+    longQCell.border = { ...THIN_BORDER };
+  }
+
   const prefix = isConditional ? '🔀 ' : '';
   if (showFragetextInHeader) {
     h.value = {
@@ -2310,18 +2155,6 @@ function writeQgBoxUnderTn(ws, qgList, qgColLetter, tnStart, tnEnd) {
       ],
     });
   });
-}
-
-// ============================================================================
-// LEGACY: writeIdiInfoBlock (entfernt zugunsten writeQgBoxUnderTn, v12.22.15).
-// Falls noch Aufrufe existieren -> No-Op, damit nichts crasht.
-// ============================================================================
-function writeIdiInfoBlock(ws, opts) {
-  // v12.22.15: Funktion ist deaktiviert. Segmente, IDI-Profile und Studien-
-  // Quoten werden NICHT mehr in den Sheet-Body geschrieben — sie bleiben in
-  // der Quotenübersicht (Sheet 1) und im Hardening-Output. Im Sheet selbst
-  // steht jetzt nur der QG-Counter (siehe writeQgBoxUnderTn).
-  return;
 }
 
 // v11: Frage-Header-Label bauen.
@@ -3530,8 +3363,8 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
     // (b) Data Validations: für Spalten, die im Template eine DV haben,
     //     diese auf die neuen Zeilen erweitern.
     //     ExcelJS speichert DVs als Map: address-string → DV-Objekt.
-    //     Wir suchen DVs auf Zellen wie "A7", "A10" etc. im Template-Bereich
-    //     und kopieren sie auf die neuen Zeilen mit gleicher Spalte.
+    //     Wir suchen DVs auf Zellen wie "A8", "A11" etc. im Template-Bereich
+    //     (ab TN_START) und kopieren sie auf die neuen Zeilen mit gleicher Spalte.
     const dvModel = ws.dataValidations?.model || ws.dataValidations || {};
     const dvEntries = (typeof dvModel === 'object' && !Array.isArray(dvModel))
       ? Object.entries(dvModel)
@@ -3540,7 +3373,7 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
     const dvByCol = new Map(); // col-letter → DV-Objekt
     for (const [sqref, dv] of dvEntries) {
       if (!sqref || !dv) continue;
-      // sqref kann sein: "A7", "A7:A16", "A7 B7" oder mehrere Bereiche.
+      // sqref kann sein: "A8", "A8:A17", "A8 B8" oder mehrere Bereiche.
       // Wir splitten an Leerzeichen und Komma.
       const refs = String(sqref).split(/[\s,]+/);
       for (const ref of refs) {
@@ -3945,6 +3778,9 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
 
   // Höhere Zeilen für Matrix-Header und Frage-Header
   ws.getRow(MATRIX_HEADER_ROW).height = 32;
+  // v12.22.18: Z6 (LONG_QUESTION_ROW) bekommt 72pt fuer mehrzeilige Original-Frage.
+  // Template hat 27pt vorgesehen, das reicht nur fuer eine Zeile — wir vergroessern.
+  ws.getRow(LONG_QUESTION_ROW).height = 72;
   ws.getRow(HEADER_ROW).height = 75;
 
   // v12.22.15: writeIdiInfoBlock entfernt - QG-Box ersetzt Segmente/IDI-Profile/Studien-Quoten
@@ -4269,7 +4105,7 @@ export default async function handler(req, res) {
         laufzeitBis: builderOptions.laufzeitBis,
         // v12.22.1: Quotengruppen-Debug pro Sheet
         qgDebug: globalThis.__QG_DEBUG__ || [],
-        version: 'v12.22.17-revert-z4-frage',
+        version: 'v12.22.20-cleanup',
       },
     });
   } catch (err) {
@@ -4282,7 +4118,7 @@ export default async function handler(req, res) {
       errorType: err?.name || 'Error',
       stack: err?.stack ? String(err.stack).split('\n').slice(0, 8) : null,
       qgDebug: globalThis.__QG_DEBUG__ || [],
-      version: 'v12.22.17-revert-z4-frage',
+      version: 'v12.22.20-cleanup',
     });
   }
 }
