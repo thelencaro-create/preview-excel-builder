@@ -116,20 +116,18 @@
 //   das fehlt, auf Spalten-Berechnung zurückfallen. EMU↔Pixel-Umrechnung
 //   per Heuristik (Werte >10000 = EMU).
 //
-// v12.22.16 (17.05.2026): VOLLE SCREENER-FRAGE IN Z4 (LONG_QUESTION_ROW)
-// - User-Feedback: Interviewer wollen oberhalb der Kurzfrage die vollstaendige
-//   Frage aus dem Screener sehen — fuer Kontext beim Recruiting.
-// - Quick-Fix: lange Frage in Z4 (LONG_QUESTION_ROW=4), italic 8pt grau.
-//   Z4 ist im Frage-Bereich (ab Spalte Q) frei (Sheet-Header endet bei
-//   Spalte L). Kein Layout-Verschieben (keine Konstanten-Aenderung).
-// - Verhalten:
-//   * Single-Frage-Spalten: Z4 zeigt frage.fragetext.
-//   * Matrix-Item-Spalten: Z4 leer — Mutter-Frage steht bereits in Z5
-//     (gemerged), Item-Beschreibung im Z6-RichText.
-//   * Redundanz-Filter: wenn fragetext == kurz_label, Z4 weggelassen.
-// - Englisch->Deutsch-Uebersetzung wird vom Parser-Prompt gemacht (Regel
-//   ist bereits drin); falls Doppelungen in Outputs auftauchen, Parser-
-//   Prompt nachschaerfen mit Beispielen.
+// v12.22.17 (20.05.2026): REVERT v12.22.16 (Z4-FRAGE)
+// - Problem: v12.22.16 hat lange Fragen in Z4 geschrieben + Z4-Hoehe auf
+//   60pt erhoeht. Bei VGD-Templates mit Sheet-Header bis Spalte M und Logo
+//   im Merge F1:H4 fuehrte das zu Layout-Chaos: Logo verschoben, Frage-
+//   Texte direkt neben den Sheet-Header-Eintraegen (A4 'Rekru Standorte',
+//   I4 'F&T Projekt-Nr.', L4 'Incentive').
+// - Fix: Z4-Frage-Block aus writeQuestionColumn entfernt, Z4-Hoehe nicht
+//   mehr veraendert. Layout identisch zu v12.22.15.
+// - LONG_QUESTION_ROW-Konstante bleibt deklariert (ungenutzt), falls
+//   spaeter eine sauberere Tooltip-Variante kommt.
+//
+// v12.22.16 (17.05.2026): VOLLE SCREENER-FRAGE IN Z4 (LONG_QUESTION_ROW) — REVERTED
 //
 // v12.22.15 (17.05.2026): QG-BOX UNTER TN IN SPALTE G + SEGMENTE RAUS
 // - User-Wunsch: QG-Counter unter TN-Bereich in Spalte G (dort wo frueher
@@ -2116,27 +2114,6 @@ function writeQuestionColumn(ws, col, label, note, antList, quoteText, tnEnd, gr
   const showFragetextInHeader = isToolInputId && ftClean.length > 20 &&
     ftClean.toLowerCase() !== krzClean.toLowerCase();
 
-  // v12.22.16: Volle Screener-Frage in Z4 (LONG_QUESTION_ROW) anzeigen.
-  // Z4 ist im Frage-Bereich (ab Spalte Q) frei (Sheet-Header endet bei
-  // Spalte L). Damit hat der Recruiter die Originalfrage direkt im Blickfeld.
-  //
-  // NICHT schreiben bei Matrix-Item-Spalten — dort zeigt Z5 bereits die
-  // gemergede Mutter-Frage; in Z4 waere der Text redundant pro Item-Spalte.
-  // Heuristik: wenn frage.items.length > 0 und label != frage.kurz_label
-  // (= label ist ein item.item_label), dann ist diese Spalte ein Matrix-Item.
-  const isMatrixItemColumn = Array.isArray(frage && frage.items) && frage.items.length > 0
-    && label !== (frage.kurz_label || frage.kurzlabel)
-    && label !== (frage.fragetext || '');
-  // Redundanz vermeiden: wenn Fragetext == Kurzlabel (oder leer), Z4 weglassen.
-  if (!isMatrixItemColumn && ftClean && ftClean.length > 0 && ftClean.toLowerCase() !== krzClean.toLowerCase()) {
-    const longQCell = ws.getCell(LONG_QUESTION_ROW, col);
-    longQCell.value = ftClean;
-    longQCell.font = { name: 'Arial', size: 8, italic: true, color: { argb: 'FF555555' } };
-    longQCell.alignment = { horizontal: 'left', vertical: 'top', wrapText: true };
-    // Kein Hintergrund (transparent zur Sheet-Background), kein Border —
-    // soll dezent neben dem Sheet-Header (A4-L4) stehen ohne aufzudraengen.
-  }
-
   const prefix = isConditional ? '🔀 ' : '';
   if (showFragetextInHeader) {
     h.value = {
@@ -3967,11 +3944,6 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
   }
 
   // Höhere Zeilen für Matrix-Header und Frage-Header
-  // v12.22.16: Z4 (LONG_QUESTION_ROW) bekommt 60pt fuer mehrzeilige Original-Frage,
-  // wrap-text macht den Rest. Nur falls die Zeile noch Sheet-Header-Hoehe hat
-  // (Standardwert ≤30) — sonst lassen wir die Vorlagen-Hoehe stehen.
-  const currentH4 = ws.getRow(LONG_QUESTION_ROW).height || 15;
-  if (currentH4 < 50) ws.getRow(LONG_QUESTION_ROW).height = 60;
   ws.getRow(MATRIX_HEADER_ROW).height = 32;
   ws.getRow(HEADER_ROW).height = 75;
 
@@ -4297,7 +4269,7 @@ export default async function handler(req, res) {
         laufzeitBis: builderOptions.laufzeitBis,
         // v12.22.1: Quotengruppen-Debug pro Sheet
         qgDebug: globalThis.__QG_DEBUG__ || [],
-        version: 'v12.22.16-long-question-z4',
+        version: 'v12.22.17-revert-z4-frage',
       },
     });
   } catch (err) {
@@ -4310,7 +4282,7 @@ export default async function handler(req, res) {
       errorType: err?.name || 'Error',
       stack: err?.stack ? String(err.stack).split('\n').slice(0, 8) : null,
       qgDebug: globalThis.__QG_DEBUG__ || [],
-      version: 'v12.22.16-long-question-z4',
+      version: 'v12.22.17-revert-z4-frage',
     });
   }
 }
