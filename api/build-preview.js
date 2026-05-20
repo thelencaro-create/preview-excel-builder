@@ -1,5 +1,17 @@
 // api/build-preview.js
-// Preview Generator – Excel Builder v8 (template-aware headers)
+// Preview Generator – Excel Builder v12.22.21 (Notiz/Sprach/Matrix-Fixes)
+//
+// v12.22.21 (20.05.2026): 4 Bugfixes aus Test-Run AI-Preview:
+// - Bug 1: Quotenübersicht — Frage-Header pro Gruppe einmal, Codes eingerückt
+//          statt 'QGENDER. Geschlecht' 5x wiederholt
+// - Bug 2: VGD-Fallback (HINWEISE FÜR DIESE GRUPPE) — exakt-Match Dedupe gegen
+//          globale HINWEISE FÜR DEN REKRUTIERER (keine wortgleiche Doppelung)
+// - Bug 3: stripQCode() entfernt 'Qxxxxx.' Präfix aus Labels (Deutsch-only).
+//          Comments im TN-Tabellen-Header (Z7) entfernt — Z6 ist die Quelle.
+// - Bug 4: Matrix-Items: Fragetext jetzt in Z6 gemerged über Item-Spalten
+//          (vorher leer, da Z5-Suppression versehentlich auch Z6 traf)
+//
+// Builder v8 (template-aware headers)
 //
 // Layout-Konzept:
 //   Z1-4:    Header (Studio, Kunde, Projekt) — aus Template
@@ -1945,7 +1957,9 @@ function writeQuestionColumn(ws, col, label, note, antList, quoteText, tnEnd, gr
   // v12.22.18: Volle Screener-Frage in Z6 (LONG_QUESTION_ROW). Template hat
   // Z6 fuer diese Zeile vorbereitet (zwischen MATRIX_HEADER_ROW=5 und
   // HEADER_ROW=7). Smart-Suppression:
-  //   - Bei Matrix-Item-Spalten: leer (Mutter-Frage steht in Z5 gemerged)
+  //   - Bei Matrix-Item-Spalten: leer, da Z6 ueber die Matrix-Spannweite
+  //     vom Matrix-Loop GEMERGED + befuellt wird (v12.22.21 / Bug 4).
+  //     Vorher war Z6 bei Matrix-Items komplett leer.
   //   - Wenn fragetext == kurz_label oder leer: leer
   const isMatrixItemColumn = Array.isArray(frage && frage.items) && frage.items.length > 0
     && label !== (frage.kurz_label || frage.kurzlabel)
@@ -1960,22 +1974,29 @@ function writeQuestionColumn(ws, col, label, note, antList, quoteText, tnEnd, gr
   }
 
   const prefix = isConditional ? '🔀 ' : '';
+  // v12.22.21 (Bug 3): Label wird ohne Q-Code-Präfix angezeigt — buildHeaderLabel
+  // hat das bereits gestrippt. Hier zusätzliche Sicherung für Labels, die nicht
+  // durch buildHeaderLabel gegangen sind (Matrix-Items, summaryLabel etc.):
+  const cleanLabel = stripQCode(label);
   if (showFragetextInHeader) {
     h.value = {
       richText: [
-        { text: prefix + label,           font: { bold: true,  name: 'Arial', size: 9, color: { argb: 'FF000000' } } },
+        { text: prefix + cleanLabel,      font: { bold: true,  name: 'Arial', size: 9, color: { argb: 'FF000000' } } },
         { text: '\n',                     font: { name: 'Arial', size: 8 } },
         { text: ftClean,                  font: { italic: true, name: 'Arial', size: 8, color: { argb: 'FF555555' } } },
       ],
     };
   } else {
-    h.value = prefix + label;
+    h.value = prefix + cleanLabel;
     h.font = { bold: true, name: 'Arial', size: 9, color: { argb: 'FF000000' } };
   }
   h.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
   h.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: isConditional ? (clusterLightArgb || 'FFFFF2CC') : COLORS.HEADER_GREY } };
   h.border = headerBorder;
-  if (note) h.note = note;
+  // v12.22.21 (Bug 3 / User-Wunsch): Comment am Header entfernt — Z6 ist die
+  // Quelle für den Fragetext. Bedingungen erscheinen weiterhin in der
+  // Cluster-Legende der Quotenübersicht (Sektion 3.5).
+  // (Alt: if (note) h.note = note;  — Param `note` wird ignoriert.)
 
   // TN-Zellen (genau brutto-Zeilen)
   // Letzte TN-Zeile bekommt dickere schwarze Bottom-Border (visueller Abschluss TN-Bereich)
@@ -2257,6 +2278,9 @@ function buildHeaderLabel(frage) {
   const lang = (frage.fragetext || '').trim();
   // v11.4: kurz_label intelligent reduzieren wenn zu lang
   kurz = compactKurzLabel(kurz);
+  // v12.22.21 (Bug 3): Q-Code-Präfix aus dem kurz_label entfernen
+  // (Deutsch-only Label gewünscht: 'QGENDER. Geschlecht' → 'Geschlecht')
+  kurz = stripQCode(kurz);
   if (kurz) {
     // Wenn kurz_label schon mit der ID startet, nicht doppelt
     if (id && !kurz.toLowerCase().startsWith(id.toLowerCase())) {
@@ -2264,8 +2288,50 @@ function buildHeaderLabel(frage) {
     }
     return kurz.substring(0, 40);
   }
-  if (id && lang) return `${id}. ${lang}`.substring(0, 40);
+  // v12.22.21 (Bug 3): Wenn nach stripQCode nichts übrig (z.B. kurz_label war
+  // nur 'QEMPLOYMENT.'), Fallback auf compactKurzLabel(fragetext) statt
+  // wieder die englische Q-ID anzuzeigen.
+  if (lang) {
+    const fromLang = stripQCode(compactKurzLabel(lang));
+    if (fromLang) {
+      if (id && !fromLang.toLowerCase().startsWith(id.toLowerCase())) {
+        return `${id}. ${fromLang}`.substring(0, 40);
+      }
+      return fromLang.substring(0, 40);
+    }
+    if (id) return `${id}. ${lang}`.substring(0, 40);
+    return lang.substring(0, 40);
+  }
   return (lang || id).substring(0, 40);
+}
+
+// v12.22.21 (Bug 3): Entfernt führenden 'Qxxxxx.'-Präfix aus einem Label
+// und erhält dabei conditional-marker-Präfixe (🔀, ●).
+// Beispiele:
+//   'QGENDER. Geschlecht'              → 'Geschlecht'
+//   'QAGE. Alter'                      → 'Alter'
+//   '🔀 QOCCUPATION.'                  → '🔀' (leer dahinter — Caller-Fallback)
+//   'QFAMILIARITY. Vertrautheit Tech.' → 'Vertrautheit Tech.'
+//   'STATE_DE. Bundesland'             → 'Bundesland'
+//   'Q1. Geschlecht'                   → 'Q1. Geschlecht' (echte deutsche Frage-Nr. bleibt!)
+// Wird NICHT angewandt auf F-Codes (F1, F2) oder reine Q-Nr. (Q1, Q2a).
+function stripQCode(label) {
+  if (label == null) return '';
+  let s = String(label).trim();
+  if (!s) return '';
+  // Conditional-/Cluster-Marker am Anfang erhalten
+  let prefix = '';
+  const markers = ['🔀 ', '● ', '⚠ '];
+  for (const m of markers) {
+    if (s.startsWith(m)) { prefix = m; s = s.substring(m.length); break; }
+  }
+  // Strip nur ECHTE Variablen-Codes: Q + ≥2 Großbuchstaben/Unterstriche/Ziffern + Punkt
+  // Beispiele die matchen: QGENDER. QAGE. QFAMILIARITY. STATE_DE. QINCOME_DE.
+  // Beispiele die NICHT matchen: Q1. Q2a. F1. (echte Frage-Nummern bleiben)
+  const stripped = s.replace(/^(?:Q|STATE_DE|[A-Z]+_[A-Z]+)[A-Z_][A-Z0-9_]*\.\s*/, '');
+  // Wenn nichts gestripped wurde (Frage-Nr-Pattern wie 'Q1.'), Original zurück
+  if (stripped === s) return prefix + s;
+  return (prefix + stripped).trim();
 }
 
 // v12.17: Erkennt Alter-/Geschlecht-Fragen, damit bei diesen KEIN Fragetext
@@ -2706,19 +2772,37 @@ function buildOverviewSheet(workbook, gruppen, fragen, studienQuoten, idiProfile
     ws.getRow(row).height = 22;
     row++;
 
+    // v12.22.21 (Bug 1): Gruppieren nach frageLabel — Frage einmal als Header,
+    // Codes/Items eingerückt darunter. Vorher: 'QGENDER. Geschlecht' 5x in B-Spalte.
+    let lastLabel = null;
     for (const h of globalHinweise) {
-      ws.getCell(`B${row}`).value = h.frageLabel;
-      ws.getCell(`B${row}`).font = { name: 'Calibri', size: 10, bold: true };
-      ws.getCell(`B${row}`).alignment = { horizontal: 'left', vertical: 'top', wrapText: true, indent: 1 };
-
+      // v12.22.21 (Bug 3): Q-Code-Präfix aus frageLabel entfernen
+      const cleanLabel = stripQCode(h.frageLabel) || h.frageLabel;
+      const isNewQuestion = cleanLabel !== lastLabel;
+      if (isNewQuestion) {
+        // Header-Zeile mit Frage-Label (bold, B-Spalte)
+        ws.mergeCells(`B${row}:D${row}`);
+        const hb = ws.getCell(`B${row}`);
+        hb.value = cleanLabel;
+        hb.font = { name: 'Calibri', size: 10, bold: true, color: { argb: 'FF1F4E78' } };
+        hb.alignment = { horizontal: 'left', vertical: 'middle', indent: 1 };
+        hb.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFF9E6' } };
+        ws.getRow(row).height = 18;
+        ws.getRow(row).outlineLevel = 1;
+        row++;
+        lastLabel = cleanLabel;
+      }
+      // Code/Text-Zeile (eingerückt, C+D gemerged)
+      ws.getCell(`B${row}`).value = '';
+      ws.getCell(`B${row}`).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFF9E6' } };
       ws.mergeCells(`C${row}:D${row}`);
       const t = ws.getCell(`C${row}`);
-      t.value = h.text;
+      t.value = '  ' + h.text;
       t.font = { name: 'Calibri', size: 10, italic: true };
-      t.alignment = { horizontal: 'left', vertical: 'top', wrapText: true, indent: 1 };
+      t.alignment = { horizontal: 'left', vertical: 'top', wrapText: true, indent: 2 };
       t.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFF9E6' } };
 
-      ws.getRow(row).height = Math.max(20, Math.min(80, Math.ceil(h.text.length / 70) * 18));
+      ws.getRow(row).height = Math.max(18, Math.min(80, Math.ceil(h.text.length / 70) * 18));
       ws.getRow(row).outlineLevel = 1;
       row++;
     }
@@ -2873,29 +2957,45 @@ function buildOverviewSheet(workbook, gruppen, fragen, studienQuoten, idiProfile
       ws.getRow(row).outlineLevel = 1;
       row++;
 
+      // v12.22.21 (Bug 1): Gruppieren nach frageLabel — Frage einmal als
+      // Header, Codes/Items eingerückt darunter.
+      let lastAnforderungLabel = null;
       for (const eintrag of anforderungen) {
-        const bCell = ws.getCell(`B${row}`);
-        // v12.13: Bei bedingter Frage Cluster-Indikator vorne + Hintergrund-Akzent
+        // v12.22.21 (Bug 3): Q-Code-Präfix aus frageLabel entfernen
+        const cleanLabel = stripQCode(eintrag.frageLabel) || eintrag.frageLabel;
         const labelPrefix = eintrag.clusterColor ? '● ' : '';
-        bCell.value = labelPrefix + eintrag.frageLabel;
-        bCell.font = { name: 'Calibri', size: 10, bold: true,
-          color: { argb: eintrag.clusterColor || 'FF000000' } };
-        bCell.alignment = { horizontal: 'left', vertical: 'top', wrapText: true, indent: 1 };
-        // v12.13: Hintergrund-Fill statt Border (alle 3 Zellen B/C/D)
-        if (eintrag.clusterLight) {
-          const fillSpec = { type: 'pattern', pattern: 'solid', fgColor: { argb: eintrag.clusterLight } };
-          bCell.fill = fillSpec;
-          ws.getCell(`C${row}`).fill = fillSpec;
-          ws.getCell(`D${row}`).fill = fillSpec;
-        }
+        const isNewQuestion = cleanLabel !== lastAnforderungLabel;
+        const fillSpec = eintrag.clusterLight
+          ? { type: 'pattern', pattern: 'solid', fgColor: { argb: eintrag.clusterLight } }
+          : null;
 
-        ws.getCell(`C${row}`).value = eintrag.codeText;
+        if (isNewQuestion) {
+          // Header-Zeile mit Frage-Label
+          ws.mergeCells(`B${row}:D${row}`);
+          const hb = ws.getCell(`B${row}`);
+          hb.value = labelPrefix + cleanLabel;
+          hb.font = { name: 'Calibri', size: 10, bold: true,
+                      color: { argb: eintrag.clusterColor || 'FF1F4E78' } };
+          hb.alignment = { horizontal: 'left', vertical: 'middle', indent: 1 };
+          if (fillSpec) hb.fill = fillSpec;
+          ws.getRow(row).height = 18;
+          ws.getRow(row).outlineLevel = 1;
+          row++;
+          lastAnforderungLabel = cleanLabel;
+        }
+        // Code/Soll-Zeile (eingerückt)
+        ws.getCell(`B${row}`).value = '';
+        if (fillSpec) ws.getCell(`B${row}`).fill = fillSpec;
+
+        ws.getCell(`C${row}`).value = '  ' + eintrag.codeText;
         ws.getCell(`C${row}`).font = { name: 'Calibri', size: 10 };
-        ws.getCell(`C${row}`).alignment = { horizontal: 'left', vertical: 'top', wrapText: true, indent: 1 };
+        ws.getCell(`C${row}`).alignment = { horizontal: 'left', vertical: 'top', wrapText: true, indent: 2 };
+        if (fillSpec) ws.getCell(`C${row}`).fill = fillSpec;
 
         ws.getCell(`D${row}`).value = eintrag.soll;
         ws.getCell(`D${row}`).font = { name: 'Calibri', size: 10, bold: true, color: { argb: 'FF548235' } };
         ws.getCell(`D${row}`).alignment = { horizontal: 'left', vertical: 'top', wrapText: true, indent: 1 };
+        if (fillSpec) ws.getCell(`D${row}`).fill = fillSpec;
 
         const maxLen = Math.max((eintrag.codeText || '').length, (eintrag.soll || '').length);
         ws.getRow(row).height = Math.max(18, Math.min(60, Math.ceil(maxLen / 50) * 18));
@@ -2907,9 +3007,19 @@ function buildOverviewSheet(workbook, gruppen, fragen, studienQuoten, idiProfile
       // nochmal pro Gruppe als einklappbare Liste (outlineLevel=1). So sieht
       // der Recruiter sie direkt im Gruppen-Block ohne nach oben scrollen zu
       // müssen. Bei Bedarf zuklappen.
+      // v12.22.21 (Bug 2): Exakt-Match-Dedupe gegen die globalen HINWEISE
+      // FÜR DEN REKRUTIERER weiter oben. Wenn alle Einträge identisch sind
+      // (typischer Fall), fällt der Block weg und die '(keine Gruppen-
+      // spezifischen)'-Meldung wird angezeigt.
       const globalHinweiseFallback = collectGlobalHinweise(fragen);
-      if (globalHinweiseFallback.length === 0) {
-        // Wirklich nichts da — der ursprüngliche Hinweis
+      const globalSet = new Set(
+        (globalHinweise || []).map(g => `${g.frageLabel}||${g.text}`)
+      );
+      const gruppenSpezifischeHinweise = globalHinweiseFallback.filter(
+        h => !globalSet.has(`${h.frageLabel}||${h.text}`)
+      );
+      if (gruppenSpezifischeHinweise.length === 0) {
+        // Wirklich nichts Gruppen-Spezifisches da — der ursprüngliche Hinweis
         ws.mergeCells(`B${row}:D${row}`);
         const empty = ws.getCell(`B${row}`);
         empty.value = '(keine Gruppen-spezifischen Anforderungen — siehe globale Quoten oben)';
@@ -2921,24 +3031,39 @@ function buildOverviewSheet(workbook, gruppen, fragen, studienQuoten, idiProfile
       } else {
         ws.mergeCells(`B${row}:D${row}`);
         const ah = ws.getCell(`B${row}`);
-        ah.value = '✅ HINWEISE FÜR DIESE GRUPPE (es gelten die globalen Hinweise)';
+        ah.value = '✅ HINWEISE FÜR DIESE GRUPPE (zusätzlich zu den globalen)';
         ah.font = { name: 'Calibri', size: 11, bold: true, color: { argb: 'FF548235' } };
         ah.alignment = { horizontal: 'left', vertical: 'middle', indent: 1 };
         ws.getRow(row).height = 22;
         ws.getRow(row).outlineLevel = 1;
         row++;
 
-        for (const h of globalHinweiseFallback) {
-          ws.getCell(`B${row}`).value = h.frageLabel;
-          ws.getCell(`B${row}`).font = { name: 'Calibri', size: 9, bold: true };
-          ws.getCell(`B${row}`).alignment = { horizontal: 'left', vertical: 'top', wrapText: true, indent: 1 };
+        // v12.22.21 (Bug 1): Auch hier nach frageLabel gruppieren
+        let lastFallbackLabel = null;
+        for (const h of gruppenSpezifischeHinweise) {
+          const cleanLabel = stripQCode(h.frageLabel) || h.frageLabel;
+          const isNewQuestion = cleanLabel !== lastFallbackLabel;
+          if (isNewQuestion) {
+            ws.mergeCells(`B${row}:D${row}`);
+            const hb = ws.getCell(`B${row}`);
+            hb.value = cleanLabel;
+            hb.font = { name: 'Calibri', size: 9, bold: true, color: { argb: 'FF1F4E78' } };
+            hb.alignment = { horizontal: 'left', vertical: 'middle', indent: 1 };
+            hb.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFF9E6' } };
+            ws.getRow(row).height = 16;
+            ws.getRow(row).outlineLevel = 1;
+            row++;
+            lastFallbackLabel = cleanLabel;
+          }
+          ws.getCell(`B${row}`).value = '';
+          ws.getCell(`B${row}`).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFF9E6' } };
           ws.mergeCells(`C${row}:D${row}`);
           const t = ws.getCell(`C${row}`);
-          t.value = h.text;
+          t.value = '  ' + h.text;
           t.font = { name: 'Calibri', size: 9, italic: true };
-          t.alignment = { horizontal: 'left', vertical: 'top', wrapText: true, indent: 1 };
+          t.alignment = { horizontal: 'left', vertical: 'top', wrapText: true, indent: 2 };
           t.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFF9E6' } };
-          ws.getRow(row).height = Math.max(18, Math.min(60, Math.ceil(h.text.length / 80) * 14));
+          ws.getRow(row).height = Math.max(16, Math.min(60, Math.ceil(h.text.length / 80) * 14));
           ws.getRow(row).outlineLevel = 1;
           row++;
         }
@@ -3657,14 +3782,34 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
       const compactHint = (compactMatrix && otherItems.length > 0)
         ? ` [kompakt: ${itemsToColumns.length}/${frage.items.length} relevante Items]`
         : '';
-      mh.value = (frage.kurz_label || frage.fragetext || frage.id) + compactHint;
+      // v12.22.21 (Bug 3): Z5-Label ohne Q-Code-Präfix
+      const motherLabel = stripQCode(frage.kurz_label || frage.fragetext || frage.id);
+      mh.value = motherLabel + compactHint;
       mh.font = { name: 'Arial', size: 10, bold: true };
       mh.alignment = { horizontal: 'center', vertical: 'center', wrapText: true };
       mh.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: COLORS.MATRIX_HDR } };
       mh.border = borderWithThickRight(HEADER_BORDER);
-      // v12.17: Mutter-Header-Note enthaelt jetzt Fragetext + Quote (vorher nur Quote)
-      const mhNote = buildHeaderNote(frage, matrixQuoteText);
-      if (mhNote) mh.note = mhNote;
+      // v12.22.21 (Bug 3 / User-Wunsch): Comment am Mutter-Header entfernt
+      // (Alt: const mhNote = buildHeaderNote(frage, matrixQuoteText); if (mhNote) mh.note = mhNote;)
+
+      // v12.22.21 (Bug 4): Mutter-FRAGE in Z6 gemerged über die Matrix-Spannweite.
+      // Vorher war Z6 bei Matrix-Items komplett leer, weil writeQuestionColumn
+      // die Z6-Befüllung bei isMatrixItemColumn=true skippt. Jetzt schreiben wir
+      // den Fragetext einmal zentral hier.
+      const matrixFragetext = (frage.fragetext || '').trim();
+      const matrixKurzClean = stripQCode(frage.kurz_label || frage.kurzlabel || '').trim();
+      if (matrixFragetext && matrixFragetext.toLowerCase() !== matrixKurzClean.toLowerCase()) {
+        if (matrixEnd > matrixStart) {
+          try {
+            ws.mergeCells(LONG_QUESTION_ROW, matrixStart, LONG_QUESTION_ROW, matrixEnd);
+          } catch (e) {}
+        }
+        const longCell = ws.getCell(LONG_QUESTION_ROW, matrixStart);
+        longCell.value = matrixFragetext;
+        longCell.font = { name: 'Arial', size: 9, italic: true, color: { argb: 'FF555555' } };
+        longCell.alignment = { horizontal: 'left', vertical: 'top', wrapText: true };
+        longCell.border = { ...THIN_BORDER };
+      }
     } else if (frage.typ === 'freitext' || frage.typ === 'numerisch') {
       // Freitext / Numerisch: nur Header, keine Antwort-Codes
       // v12.17: Note via buildHeaderNote — Fragetext + Bedingung (ausser Alter/Geschlecht)
