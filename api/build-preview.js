@@ -116,6 +116,21 @@
 //   das fehlt, auf Spalten-Berechnung zurückfallen. EMU↔Pixel-Umrechnung
 //   per Heuristik (Werte >10000 = EMU).
 //
+// v12.22.16 (17.05.2026): VOLLE SCREENER-FRAGE IN Z4 (LONG_QUESTION_ROW)
+// - User-Feedback: Interviewer wollen oberhalb der Kurzfrage die vollstaendige
+//   Frage aus dem Screener sehen — fuer Kontext beim Recruiting.
+// - Quick-Fix: lange Frage in Z4 (LONG_QUESTION_ROW=4), italic 8pt grau.
+//   Z4 ist im Frage-Bereich (ab Spalte Q) frei (Sheet-Header endet bei
+//   Spalte L). Kein Layout-Verschieben (keine Konstanten-Aenderung).
+// - Verhalten:
+//   * Single-Frage-Spalten: Z4 zeigt frage.fragetext.
+//   * Matrix-Item-Spalten: Z4 leer — Mutter-Frage steht bereits in Z5
+//     (gemerged), Item-Beschreibung im Z6-RichText.
+//   * Redundanz-Filter: wenn fragetext == kurz_label, Z4 weggelassen.
+// - Englisch->Deutsch-Uebersetzung wird vom Parser-Prompt gemacht (Regel
+//   ist bereits drin); falls Doppelungen in Outputs auftauchen, Parser-
+//   Prompt nachschaerfen mit Beispielen.
+//
 // v12.22.15 (17.05.2026): QG-BOX UNTER TN IN SPALTE G + SEGMENTE RAUS
 // - User-Wunsch: QG-Counter unter TN-Bereich in Spalte G (dort wo frueher
 //   Segment-Beschreibungen, IDI-Profile-Liste und Studien-Quoten standen).
@@ -332,6 +347,7 @@ function detectHeaderPositions(ws) {
 const TN_START = 7;
 const MATRIX_HEADER_ROW = 5;
 const HEADER_ROW = 6;
+const LONG_QUESTION_ROW = 4;  // v12.22.16: volle Screener-Frage (italic, klein) ueber dem Matrix-Header
 const QUOTE_HINT_AFTER_TN_OFFSET = 1;  // "X für Y"-Label = TN_END + 1
 const ANT_OFFSET = 2;                  // Antworten beginnen TN_END + 2
 
@@ -2099,6 +2115,27 @@ function writeQuestionColumn(ws, col, label, note, antList, quoteText, tnEnd, gr
   const krzClean = (frage && (frage.kurz_label || frage.kurzlabel) || '').trim();
   const showFragetextInHeader = isToolInputId && ftClean.length > 20 &&
     ftClean.toLowerCase() !== krzClean.toLowerCase();
+
+  // v12.22.16: Volle Screener-Frage in Z4 (LONG_QUESTION_ROW) anzeigen.
+  // Z4 ist im Frage-Bereich (ab Spalte Q) frei (Sheet-Header endet bei
+  // Spalte L). Damit hat der Recruiter die Originalfrage direkt im Blickfeld.
+  //
+  // NICHT schreiben bei Matrix-Item-Spalten — dort zeigt Z5 bereits die
+  // gemergede Mutter-Frage; in Z4 waere der Text redundant pro Item-Spalte.
+  // Heuristik: wenn frage.items.length > 0 und label != frage.kurz_label
+  // (= label ist ein item.item_label), dann ist diese Spalte ein Matrix-Item.
+  const isMatrixItemColumn = Array.isArray(frage && frage.items) && frage.items.length > 0
+    && label !== (frage.kurz_label || frage.kurzlabel)
+    && label !== (frage.fragetext || '');
+  // Redundanz vermeiden: wenn Fragetext == Kurzlabel (oder leer), Z4 weglassen.
+  if (!isMatrixItemColumn && ftClean && ftClean.length > 0 && ftClean.toLowerCase() !== krzClean.toLowerCase()) {
+    const longQCell = ws.getCell(LONG_QUESTION_ROW, col);
+    longQCell.value = ftClean;
+    longQCell.font = { name: 'Arial', size: 8, italic: true, color: { argb: 'FF555555' } };
+    longQCell.alignment = { horizontal: 'left', vertical: 'top', wrapText: true };
+    // Kein Hintergrund (transparent zur Sheet-Background), kein Border —
+    // soll dezent neben dem Sheet-Header (A4-L4) stehen ohne aufzudraengen.
+  }
 
   const prefix = isConditional ? '🔀 ' : '';
   if (showFragetextInHeader) {
@@ -3930,6 +3967,11 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
   }
 
   // Höhere Zeilen für Matrix-Header und Frage-Header
+  // v12.22.16: Z4 (LONG_QUESTION_ROW) bekommt 60pt fuer mehrzeilige Original-Frage,
+  // wrap-text macht den Rest. Nur falls die Zeile noch Sheet-Header-Hoehe hat
+  // (Standardwert ≤30) — sonst lassen wir die Vorlagen-Hoehe stehen.
+  const currentH4 = ws.getRow(LONG_QUESTION_ROW).height || 15;
+  if (currentH4 < 50) ws.getRow(LONG_QUESTION_ROW).height = 60;
   ws.getRow(MATRIX_HEADER_ROW).height = 32;
   ws.getRow(HEADER_ROW).height = 75;
 
@@ -4255,7 +4297,7 @@ export default async function handler(req, res) {
         laufzeitBis: builderOptions.laufzeitBis,
         // v12.22.1: Quotengruppen-Debug pro Sheet
         qgDebug: globalThis.__QG_DEBUG__ || [],
-        version: 'v12.22.15-qg-box-under-tn',
+        version: 'v12.22.16-long-question-z4',
       },
     });
   } catch (err) {
@@ -4268,7 +4310,7 @@ export default async function handler(req, res) {
       errorType: err?.name || 'Error',
       stack: err?.stack ? String(err.stack).split('\n').slice(0, 8) : null,
       qgDebug: globalThis.__QG_DEBUG__ || [],
-      version: 'v12.22.15-qg-box-under-tn',
+      version: 'v12.22.16-long-question-z4',
     });
   }
 }
