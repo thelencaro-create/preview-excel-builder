@@ -1,7 +1,21 @@
 // api/build-preview.js
-// Preview Generator – Excel Builder v12.22.22 (Robustheits-Fixes)
+// Preview Generator – Excel Builder v12.22.23 (Bug-7-Hotfix: zu aggressiv)
 //
-// v12.22.22 (20.05.2026): 4 weitere Bugfixes aus Test-Runs AI/got2b:
+// v12.22.23 (21.05.2026): Hotfix nach Test-Run 26_1234_2345_AI:
+// - Bug 7 v12.22.22b war zu aggressiv: 'mindestens einmal im Monat' aus
+//   frage.quotenkommentar triggert maxCode=3 fuer alle Codes der Frage —
+//   bei QAIUSED (single_choice mit Tool-Labels, KEINE Frequenz-Skala)
+//   wurden Codes 4-15 (Google Gemini, Meta AI, ...) faelschlich rot.
+//   Neue Regel: parseExclusionCodes Pattern 'mindestens einmal im Monat'
+//   wird unterdrueckt, wenn der Text 'qualifizieren'/'ENDE'/'HOLD'
+//   enthaelt (= Frage-weite Qualifizierungsanweisung, kein Code-Filter).
+//   Zusaetzlich: isAntOffTarget priorisiert items[].soll_quote +
+//   ant.soll_quote (PATCH 24/25 Schema) ueber frage.quotenkommentar.
+//   Bei single_choice ohne items wird frage.quotenkommentar nicht mehr
+//   ausgewertet — zu viele false positives.
+// - Bug 6 analog konservativer: nur strukturierte Quellen.
+//
+// v12.22.22b (20.05.2026): Hotfix nach erstem Test-Run AI:
 // - Bug 5: #VALUE!-Errors in Template-Headern (Z1-Z4) werden defensiv geleert.
 //          Templates hatten in F1/E1 einen gespeicherten Excel-Error — bis zur
 //          Re-Generation der Templates fängt der Builder das ab.
@@ -1791,25 +1805,50 @@ function isAntOffTarget(frage, ant, gruppe) {
   // 'MUSS Code X' o.ae. enthaelt, sind alle anderen Codes off-target. Bei Matrix-
   // Items wird zusaetzlich die Item-Bedingung beruecksichtigt (requiredItem).
   // Konservativ: nur greifen wenn parseExclusionCodes ein konkretes Match hat.
-  // v12.22.22b: Durchsucht ALLE verfuegbaren Quote-Quellen — analog Bug 6.
+  //
+  // v12.22.23 (Bug 7 Hotfix): Heuristik dramatisch eingeschraenkt nach Test-Run
+  // 26_1234_2345 (QAIUSED hatte Codes 4-15 faelschlich rot wegen 'mindestens
+  // einmal im Monat' Match in quotenkommentar). Neue Regeln:
+  //
+  //   1. parseExclusionCodes wird NUR auf candidates angewandt, die explizit
+  //      einen Code-Filter signalisieren (MUSS Code X, Range, hauptsaechlich
+  //      in). NICHT auf das alleinige Pattern "mindestens einmal im Monat".
+  //      Letzteres ist eine Quoten-Beschreibung, kein Code-Filter pro Antwort.
+  //   2. requiredItem-Match muss ueber strukturiertes Feld (frage.item_label)
+  //      laufen, nicht ueber kurz_label-Fallback (das macht z.B. die ganze
+  //      Frage QAIUSED zu "Genutzte KI-Tools" → matched gegen "ChatGPT" via
+  //      includes()=false, dann mismatching-Item, dann mein Code-2-Trigger).
   const candidates = [];
-  if (frage && frage.quotenkommentar) {
-    if (typeof frage.quotenkommentar === 'string') candidates.push(frage.quotenkommentar);
-    else if (Array.isArray(frage.quotenkommentar)) {
-      for (const qk of frage.quotenkommentar) {
-        if (typeof qk === 'string') candidates.push(qk);
-        else if (qk && typeof qk.text === 'string') candidates.push(qk.text);
+  // Item-bezogenes soll_quote ist die SICHERSTE Quelle (PATCH 24/25 Schema)
+  if (frage && Array.isArray(frage.items)) {
+    for (const item of frage.items) {
+      if (item && Array.isArray(item.soll_quote)) {
+        for (const sq of item.soll_quote) {
+          if (sq && typeof sq.text === 'string') candidates.push({text: sq.text, source: 'item'});
+        }
       }
     }
   }
-  if (frage && frage.quotenkommentar_pro_zielgruppe && gruppe && gruppe.zielgruppe) {
-    const perZG = frage.quotenkommentar_pro_zielgruppe[gruppe.zielgruppe];
-    if (typeof perZG === 'string') candidates.push(perZG);
+  // ant.soll_quote ist ebenfalls strukturiert (PATCH 25)
+  if (ant && Array.isArray(ant.soll_quote)) {
+    for (const sq of ant.soll_quote) {
+      if (sq && typeof sq.text === 'string') candidates.push({text: sq.text, source: 'ant'});
+    }
   }
-  if (frage && frage.bedingung && typeof frage.bedingung === 'string') candidates.push(frage.bedingung);
+  // frage.quotenkommentar ist die LETZTE Quelle — wird nur ausgewertet wenn die
+  // Frage Matrix-Items hat (also keine reine single_choice mit Tool-Labels)
+  if (frage && frage.quotenkommentar && Array.isArray(frage.items) && frage.items.length > 0) {
+    if (typeof frage.quotenkommentar === 'string') candidates.push({text: frage.quotenkommentar, source: 'frage'});
+    else if (Array.isArray(frage.quotenkommentar)) {
+      for (const qk of frage.quotenkommentar) {
+        if (typeof qk === 'string') candidates.push({text: qk, source: 'frage'});
+        else if (qk && typeof qk.text === 'string') candidates.push({text: qk.text, source: 'frage'});
+      }
+    }
+  }
 
   for (const cand of candidates) {
-    const parsed = parseExclusionCodes(cand);
+    const parsed = parseExclusionCodes(cand.text);
     if (!parsed) continue;
     // Code-Nummer der aktuellen Antwort ermitteln
     const antCode = typeof ant.code === 'number' ? ant.code
@@ -1817,14 +1856,20 @@ function isAntOffTarget(frage, ant, gruppe) {
                   : null;
     if (antCode === null || isNaN(antCode)) continue;
 
-    // Item-Filter: Wenn requiredItem gesetzt, ist diese Heuristik nur fuer
-    // die passende Item-Spalte anwendbar.
+    // Item-Filter — strenger als v12.22.22b: nur ueber frage.item_label,
+    // KEIN Fallback auf kurz_label (gibt false positives bei single_choice).
     const itemLabel = (frage.item_label || '').toLowerCase().trim();
-    const labelLower = itemLabel || (frage.kurz_label || '').toLowerCase().trim();
     let isMatchingItem = true;
-    if (parsed.requiredItem && labelLower) {
-      const reqItem = parsed.requiredItem.toLowerCase().trim();
-      isMatchingItem = labelLower.includes(reqItem) || reqItem.includes(labelLower);
+    if (parsed.requiredItem) {
+      if (!itemLabel) {
+        // Kein Item-Kontext (single_choice / Frage-Ebene): Heuristik nur greifen
+        // lassen, wenn cand.source !== 'frage' (also strukturiert pro Item/Ant)
+        if (cand.source === 'frage') continue;
+        isMatchingItem = true;
+      } else {
+        const reqItem = parsed.requiredItem.toLowerCase().trim();
+        isMatchingItem = itemLabel.includes(reqItem) || reqItem.includes(itemLabel);
+      }
     }
 
     // Logik 1: requiredCodes-Liste (exakte Codes)
@@ -1836,9 +1881,13 @@ function isAntOffTarget(frage, ant, gruppe) {
         if (parsed.requiredCodes.includes(antCode)) return true;
       }
     }
-    // Logik 2: Range (minCode/maxCode)
+    // Logik 2: Range (minCode/maxCode) — nur greifen wenn auch ein
+    // requiredItem ODER nicht aus frage.quotenkommentar (sonst zu aggressiv)
     if (parsed.minCode !== null || parsed.maxCode !== null) {
-      if (isMatchingItem) {
+      // Konservativ: Range nur anwenden wenn ein Item-Bezug besteht oder die
+      // Quelle strukturiert ist (item/ant soll_quote).
+      const safeToApply = parsed.requiredItem || cand.source !== 'frage';
+      if (safeToApply && isMatchingItem) {
         const min = parsed.minCode !== null ? parsed.minCode : 1;
         const max = parsed.maxCode !== null ? parsed.maxCode : 99;
         if (antCode < min || antCode > max) return true;
@@ -2058,10 +2107,10 @@ function writeQuestionColumn(ws, col, label, note, antList, quoteText, tnEnd, gr
   // Spalte bei QAIFREQUENCY mit 'als ChatGPT User qualifizieren'), bekommt sie
   // ein 📌 + amber Header-Hintergrund, sodass der Recruiter sofort erkennt
   // dass hier eine Quotengruppe entsteht.
-  // v12.22.22b: Durchsucht MEHRERE Quote-Quellen, da der Item-spezifische Quote-
-  // Text oft NICHT in `quoteText` (param) landet, sondern global in
-  // frage.quotenkommentar. parseExclusionCodes wird auf alle Quellen angewandt
-  // und das erste matching requiredItem gewinnt.
+  //
+  // v12.22.23: Wie Bug 7 — nur strukturierte Quellen (item.soll_quote,
+  // ant.soll_quote, frage.quotenkommentar nur bei Matrix). frage.bedingung
+  // entfaellt (das ist nur "Nur wenn QXY = ..." und kein Item-Marker).
   let isQuotaRelevantColumn = false;
   if (Array.isArray(frage && frage.items) && cleanLabel) {
     const candidates = [];
@@ -2072,6 +2121,16 @@ function writeQuestionColumn(ws, col, label, note, antList, quoteText, tnEnd, gr
         for (const qk of frage.quotenkommentar) {
           if (typeof qk === 'string') candidates.push(qk);
           else if (qk && typeof qk.text === 'string') candidates.push(qk.text);
+        }
+      }
+    }
+    // PATCH 24-Schema: items[].soll_quote enthaelt das Item-bezogene Min/Max
+    if (frage.items) {
+      for (const item of frage.items) {
+        if (item && Array.isArray(item.soll_quote)) {
+          for (const sq of item.soll_quote) {
+            if (sq && typeof sq.text === 'string') candidates.push(sq.text);
+          }
         }
       }
     }
@@ -2492,7 +2551,13 @@ function parseExclusionCodes(quoteText) {
   }
 
   // 3) "mindestens einmal im Monat" → maxCode=3 (Häufigkeits-Skala)
-  if (/mindestens\s+(?:einmal\s+)?(?:pro|im|am)\s+(?:Tag|Woche|Monat)/i.test(s)) {
+  // v12.22.23: Nur wenn der String NICHT Wort "qualifizieren" oder "ENDE" enthaelt
+  // — sonst ist es eine Frage-weite Qualifizierungsanweisung ("muss mind. einmal
+  // im Monat ein Tool nutzen um sich zu qualifizieren"), kein Code-Filter pro
+  // Antwort. False positives bei QAIUSED-Frage wo dieser Satz im
+  // quotenkommentar steht aber nicht die Skala der Frage betrifft.
+  if (/mindestens\s+(?:einmal\s+)?(?:pro|im|am)\s+(?:Tag|Woche|Monat)/i.test(s)
+      && !/qualifizieren|ENDE\b|HOLD\b/i.test(s)) {
     result.maxCode = 3;
     matched = true;
   }
