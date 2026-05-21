@@ -1,5 +1,19 @@
 // api/build-preview.js
-// Preview Generator – Excel Builder v12.22.23 (Bug-7-Hotfix: zu aggressiv)
+// Preview Generator – Excel Builder v12.22.24 (Bug-9-Fix: VGD-Sektionen)
+//
+// v12.22.24 (21.05.2026): Hotfix Bug 9 nach Test-Run 26_2345_3657_AI:
+// - Bug 9 (Regress aus v12.22.21 Bug 2): VGD-Sektionen in der Quoten-
+//   uebersicht zeigten 3x '(keine Gruppen-spezifischen Anforderungen)',
+//   obwohl GD1/GD2/GD3 nachweislich unterschiedliche Quoten haben (siehe
+//   QTRUSTTOOL: GD1=Codes 1-3, GD2=Codes 4-5, GD3=Natural Fallout).
+//   Ursache: Exakt-Match Dedupe gegen globale Hinweise war zu strikt —
+//   zusammengesetzte Quote-Strings 'GD1: ... GD2: ... GD3: ...' sind
+//   global UND in jeder VGD-Sektion textgleich → komplette Sektion
+//   fiel raus.
+//   Fix: filterQuoteByGruppe() (existiert seit v12.15.2) pro Gruppe
+//   anwenden. So bleibt in VGD1 nur der GD1-Teil, in VGD2 nur der GD2-
+//   Teil etc. Header umbenannt von 'HINWEISE FUER DIESE GRUPPE' zu
+//   'ANFORDERUNGEN SPEZIFISCH FUER {gruppe.id}' (klarer).
 //
 // v12.22.23 (21.05.2026): Hotfix nach Test-Run 26_1234_2345_AI:
 // - Bug 7 v12.22.22b war zu aggressiv: 'mindestens einmal im Monat' aus
@@ -3275,13 +3289,28 @@ function buildOverviewSheet(workbook, gruppen, fragen, studienQuoten, idiProfile
       // FÜR DEN REKRUTIERER weiter oben. Wenn alle Einträge identisch sind
       // (typischer Fall), fällt der Block weg und die '(keine Gruppen-
       // spezifischen)'-Meldung wird angezeigt.
+      // v12.22.24 (Bug 9): Exakt-Match war zu strikt — bei zusammengesetzten
+      // Quote-Texten wie "GD1: Codes 1-3 ... GD2: Codes 4-5 ... GD3: ..."
+      // war der String global UND in jeder VGD-Sektion identisch → komplette
+      // Sektion ging verloren ('keine Gruppen-spezifischen Anforderungen').
+      // Neue Logik: filterQuoteByGruppe() pro Gruppe anwenden — Texte werden
+      // satz-weise gefiltert, sodass GD1-Sätze nur in VGD1 erscheinen, GD2 nur
+      // in VGD2 etc. Wenn nach Filter etwas übrig bleibt UND es nicht 1:1
+      // identisch zum globalen Text ist → anzeigen.
       const globalHinweiseFallback = collectGlobalHinweise(fragen);
-      const globalSet = new Set(
-        (globalHinweise || []).map(g => `${g.frageLabel}||${g.text}`)
-      );
-      const gruppenSpezifischeHinweise = globalHinweiseFallback.filter(
-        h => !globalSet.has(`${h.frageLabel}||${h.text}`)
-      );
+      const gruppenSpezifischeHinweise = [];
+      for (const h of globalHinweiseFallback) {
+        const filtered = filterQuoteByGruppe(h.text, gruppe.id, allGruppen);
+        // Anzeigen wenn:
+        //  (a) nach Filter wurde etwas weggekürzt (= war GD-spezifisch),
+        //  (b) UND der gefilterte Rest ist nicht leer
+        if (filtered && filtered.trim() !== h.text.trim()) {
+          gruppenSpezifischeHinweise.push({
+            frageLabel: h.frageLabel,
+            text: filtered,
+          });
+        }
+      }
       if (gruppenSpezifischeHinweise.length === 0) {
         // Wirklich nichts Gruppen-Spezifisches da — der ursprüngliche Hinweis
         ws.mergeCells(`B${row}:D${row}`);
@@ -3295,7 +3324,7 @@ function buildOverviewSheet(workbook, gruppen, fragen, studienQuoten, idiProfile
       } else {
         ws.mergeCells(`B${row}:D${row}`);
         const ah = ws.getCell(`B${row}`);
-        ah.value = '✅ HINWEISE FÜR DIESE GRUPPE (zusätzlich zu den globalen)';
+        ah.value = `✅ ANFORDERUNGEN SPEZIFISCH FÜR ${(gruppe.id || '').toString().toUpperCase()}`;
         ah.font = { name: 'Calibri', size: 11, bold: true, color: { argb: 'FF548235' } };
         ah.alignment = { horizontal: 'left', vertical: 'middle', indent: 1 };
         ws.getRow(row).height = 22;
