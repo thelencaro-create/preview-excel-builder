@@ -1791,47 +1791,57 @@ function isAntOffTarget(frage, ant, gruppe) {
   // 'MUSS Code X' o.ae. enthaelt, sind alle anderen Codes off-target. Bei Matrix-
   // Items wird zusaetzlich die Item-Bedingung beruecksichtigt (requiredItem).
   // Konservativ: nur greifen wenn parseExclusionCodes ein konkretes Match hat.
-  const quoteSource = frage && (frage.quotenkommentar || frage.bedingung || '');
-  if (quoteSource) {
-    const parsed = parseExclusionCodes(String(quoteSource));
-    if (parsed) {
-      // Code-Nummer der aktuellen Antwort ermitteln
-      const antCode = typeof ant.code === 'number' ? ant.code
-                    : typeof ant.code === 'string' ? parseInt(ant.code, 10)
-                    : null;
-      if (antCode !== null && !isNaN(antCode)) {
-        // Item-Filter: Wenn requiredItem gesetzt, ist diese Heuristik nur fuer
-        // die passende Item-Spalte (frage.item_label/kurz_label/fragetext)
-        // anwendbar. Bei Mismatch fuer Items, wird die Logik UMGEKEHRT angewandt:
-        // andere Items duerfen den requiredCode NICHT haben.
-        const itemLabel = (frage.item_label || '').toLowerCase().trim();
-        const labelLower = itemLabel || (frage.kurz_label || '').toLowerCase().trim();
-        let isMatchingItem = true;
-        if (parsed.requiredItem && labelLower) {
-          const reqItem = parsed.requiredItem.toLowerCase().trim();
-          // Match wenn requiredItem-Substring im Item-Label vorkommt oder umgekehrt
-          isMatchingItem = labelLower.includes(reqItem) || reqItem.includes(labelLower);
-        }
+  // v12.22.22b: Durchsucht ALLE verfuegbaren Quote-Quellen — analog Bug 6.
+  const candidates = [];
+  if (frage && frage.quotenkommentar) {
+    if (typeof frage.quotenkommentar === 'string') candidates.push(frage.quotenkommentar);
+    else if (Array.isArray(frage.quotenkommentar)) {
+      for (const qk of frage.quotenkommentar) {
+        if (typeof qk === 'string') candidates.push(qk);
+        else if (qk && typeof qk.text === 'string') candidates.push(qk.text);
+      }
+    }
+  }
+  if (frage && frage.quotenkommentar_pro_zielgruppe && gruppe && gruppe.zielgruppe) {
+    const perZG = frage.quotenkommentar_pro_zielgruppe[gruppe.zielgruppe];
+    if (typeof perZG === 'string') candidates.push(perZG);
+  }
+  if (frage && frage.bedingung && typeof frage.bedingung === 'string') candidates.push(frage.bedingung);
 
-        // Logik 1: requiredCodes-Liste (exakte Codes)
-        if (parsed.requiredCodes && parsed.requiredCodes.length > 0) {
-          if (isMatchingItem) {
-            // Bei matching Item: Codes ausserhalb der requiredCodes-Liste = off
-            if (!parsed.requiredCodes.includes(antCode)) return true;
-          } else if (parsed.requiredItem) {
-            // Bei mismatching Item (aber Item-Bedingung gesetzt):
-            // Der requiredCode IST off-target (TN darf hier NICHT diesen Code waehlen)
-            if (parsed.requiredCodes.includes(antCode)) return true;
-          }
-        }
-        // Logik 2: Range (minCode/maxCode)
-        if (parsed.minCode !== null || parsed.maxCode !== null) {
-          if (isMatchingItem) {
-            const min = parsed.minCode !== null ? parsed.minCode : 1;
-            const max = parsed.maxCode !== null ? parsed.maxCode : 99;
-            if (antCode < min || antCode > max) return true;
-          }
-        }
+  for (const cand of candidates) {
+    const parsed = parseExclusionCodes(cand);
+    if (!parsed) continue;
+    // Code-Nummer der aktuellen Antwort ermitteln
+    const antCode = typeof ant.code === 'number' ? ant.code
+                  : typeof ant.code === 'string' ? parseInt(ant.code, 10)
+                  : null;
+    if (antCode === null || isNaN(antCode)) continue;
+
+    // Item-Filter: Wenn requiredItem gesetzt, ist diese Heuristik nur fuer
+    // die passende Item-Spalte anwendbar.
+    const itemLabel = (frage.item_label || '').toLowerCase().trim();
+    const labelLower = itemLabel || (frage.kurz_label || '').toLowerCase().trim();
+    let isMatchingItem = true;
+    if (parsed.requiredItem && labelLower) {
+      const reqItem = parsed.requiredItem.toLowerCase().trim();
+      isMatchingItem = labelLower.includes(reqItem) || reqItem.includes(labelLower);
+    }
+
+    // Logik 1: requiredCodes-Liste (exakte Codes)
+    if (parsed.requiredCodes && parsed.requiredCodes.length > 0) {
+      if (isMatchingItem) {
+        if (!parsed.requiredCodes.includes(antCode)) return true;
+      } else if (parsed.requiredItem) {
+        // Bei mismatching Item: der requiredCode IST off-target
+        if (parsed.requiredCodes.includes(antCode)) return true;
+      }
+    }
+    // Logik 2: Range (minCode/maxCode)
+    if (parsed.minCode !== null || parsed.maxCode !== null) {
+      if (isMatchingItem) {
+        const min = parsed.minCode !== null ? parsed.minCode : 1;
+        const max = parsed.maxCode !== null ? parsed.maxCode : 99;
+        if (antCode < min || antCode > max) return true;
       }
     }
   }
@@ -2048,15 +2058,36 @@ function writeQuestionColumn(ws, col, label, note, antList, quoteText, tnEnd, gr
   // Spalte bei QAIFREQUENCY mit 'als ChatGPT User qualifizieren'), bekommt sie
   // ein 📌 + amber Header-Hintergrund, sodass der Recruiter sofort erkennt
   // dass hier eine Quotengruppe entsteht.
+  // v12.22.22b: Durchsucht MEHRERE Quote-Quellen, da der Item-spezifische Quote-
+  // Text oft NICHT in `quoteText` (param) landet, sondern global in
+  // frage.quotenkommentar. parseExclusionCodes wird auf alle Quellen angewandt
+  // und das erste matching requiredItem gewinnt.
   let isQuotaRelevantColumn = false;
-  if (quoteText && Array.isArray(frage && frage.items)) {
-    const parsedHeader = parseExclusionCodes(String(quoteText));
-    if (parsedHeader && parsedHeader.requiredItem && cleanLabel) {
-      const reqItem = parsedHeader.requiredItem.toLowerCase().trim();
-      const labelLower = cleanLabel.toLowerCase().trim();
-      // Match wenn das Item-Label das requiredItem enthaelt (oder umgekehrt)
-      if (labelLower.includes(reqItem) || reqItem.includes(labelLower)) {
-        isQuotaRelevantColumn = true;
+  if (Array.isArray(frage && frage.items) && cleanLabel) {
+    const candidates = [];
+    if (quoteText) candidates.push(String(quoteText));
+    if (frage.quotenkommentar) {
+      if (typeof frage.quotenkommentar === 'string') candidates.push(frage.quotenkommentar);
+      else if (Array.isArray(frage.quotenkommentar)) {
+        for (const qk of frage.quotenkommentar) {
+          if (typeof qk === 'string') candidates.push(qk);
+          else if (qk && typeof qk.text === 'string') candidates.push(qk.text);
+        }
+      }
+    }
+    if (frage.quotenkommentar_pro_zielgruppe && gruppe && gruppe.zielgruppe) {
+      const perZG = frage.quotenkommentar_pro_zielgruppe[gruppe.zielgruppe];
+      if (typeof perZG === 'string') candidates.push(perZG);
+    }
+    const labelLower = cleanLabel.toLowerCase().trim();
+    for (const cand of candidates) {
+      const parsedHeader = parseExclusionCodes(cand);
+      if (parsedHeader && parsedHeader.requiredItem) {
+        const reqItem = parsedHeader.requiredItem.toLowerCase().trim();
+        if (labelLower.includes(reqItem) || reqItem.includes(labelLower)) {
+          isQuotaRelevantColumn = true;
+          break;
+        }
       }
     }
   }
@@ -2442,49 +2473,60 @@ function parseExclusionCodes(quoteText) {
   const result = { requiredCodes: [], requiredItem: null, minCode: null, maxCode: null };
   let matched = false;
 
-  // Pattern 1: "MUSS Code X" / "MUSS C0X" / "Code X waehlen" / "nur Code X"
-  // Erlaubt: Code, code, Cod, C, c (Letzteres fuer 'C02'-Notation)
+  // 1) "MUSS Code X" / "MUSS C0X" / "nur Code X"
   const reqMatch = s.match(/(?:MUSS|MUSS\s+nur|nur)\s*C(?:ode?)?\s*0?(\d{1,2})/i);
   if (reqMatch) {
     result.requiredCodes.push(parseInt(reqMatch[1], 10));
     matched = true;
   }
 
-  // Pattern 2: "Code 1-3" / "Code 1 bis 3" (Range)
-  const rangeMatch = s.match(/Code\s+0?(\d{1,2})\s*[-\u2013\u2014bis]+\s*0?(\d{1,2})/i);
+  // 2) Range: "1-3", "Code 1-3", "MUSS 1-3 wählen", "1-3 wählen"
+  const rangeMatch = s.match(/(?:Code\s+|MUSS\s+|\b)0?(\d{1,2})\s*[-\u2013\u2014]\s*0?(\d{1,2})\s*(?:w[äa]hlen)?/i);
   if (rangeMatch) {
-    result.minCode = parseInt(rangeMatch[1], 10);
-    result.maxCode = parseInt(rangeMatch[2], 10);
-    matched = true;
+    const lo = parseInt(rangeMatch[1], 10), hi = parseInt(rangeMatch[2], 10);
+    if (lo <= hi && hi <= 99) {
+      result.minCode = lo;
+      result.maxCode = hi;
+      matched = true;
+    }
   }
 
-  // Pattern 3: "mindestens einmal im Monat" / "min. einmal im Monat"
-  // Mapping: Skala 1=Tag, 2=Woche, 3=Monat, 4=<Monat, 5=Nie
+  // 3) "mindestens einmal im Monat" → maxCode=3 (Häufigkeits-Skala)
   if (/mindestens\s+(?:einmal\s+)?(?:pro|im|am)\s+(?:Tag|Woche|Monat)/i.test(s)) {
-    result.maxCode = 3; // alles bis "Monat" inklusiv
+    result.maxCode = 3;
     matched = true;
   }
 
-  // Pattern 4: "hauptsaechlich in X" / "kauft hauptsaechlich in X"
-  //   → impliziert: requiredCode=1 ("Hauptsaechlich") + item=X
-  const hauptMatch = s.match(/haupts[äa]chlich\s+in\s+(?:der\s+|die\s+|das\s+|den\s+|dem\s+)?([A-Za-zÄÖÜäöüß][A-Za-zÄÖÜäöüß0-9 -]{2,30})/i);
-  if (hauptMatch) {
-    if (!result.requiredCodes.includes(1)) result.requiredCodes.push(1);
-    let item = hauptMatch[1].trim().replace(/\s+(?:ein|kauft|kaufen|nutzen|verwenden).*$/i, '').trim();
-    if (item && !result.requiredItem) result.requiredItem = item;
-    matched = true;
-  }
+  // 4) Item-Bezug — mehrere Patterns, erstes Match gewinnt:
 
-  // Pattern 5: Item-Bezug "fuer X" / "als X User" / "bei X"
+  // 4a) "hauptsaechlich in X" → impliziert requiredCode=1 + item=X
   if (!result.requiredItem) {
-    const itemMatch = s.match(/(?:f[üu]r|als|bei)\s+([A-Za-z][A-Za-z0-9 -]{2,30})(?:-User|User)?/i);
-    if (itemMatch) {
-      let item = itemMatch[1].trim();
-      item = item.replace(/\s+(?:User|qualifizieren|ausw[äa]hlen|nutzen|verwenden|kauft|kaufen).*$/i, '').trim();
-      if (item && item.length > 1 && item.length < 30) {
-        result.requiredItem = item;
-        matched = true;
-      }
+    const hauptMatch = s.match(/haupts[äa]chlich\s+in\s+(?:der\s+|die\s+|das\s+|den\s+|dem\s+)?([A-Z][A-Za-zÄÖÜäöüß0-9 -]{2,30})/i);
+    if (hauptMatch) {
+      if (!result.requiredCodes.includes(1)) result.requiredCodes.push(1);
+      let item = hauptMatch[1].trim().replace(/\s+(?:ein|kauft|kaufen|nutzen|verwenden).*$/i, '').trim();
+      if (item) { result.requiredItem = item; matched = true; }
+    }
+  }
+
+  // 4b) "X User: Min" oder "X-User: Min" — Doppelpunkt-Notation aus Quote-Listen
+  if (!result.requiredItem) {
+    const userColon = s.match(/([A-Z][A-Za-zÄÖÜäöüß0-9-]+(?:\s+[A-Za-zÄÖÜäöüß0-9-]+)?)\s+-?\s*User\s*:\s*Min/);
+    if (userColon) { result.requiredItem = userColon[1].trim(); matched = true; }
+  }
+
+  // 4c) "als X User" / "als X zu qualifizieren"
+  if (!result.requiredItem) {
+    const alsM = s.match(/als\s+([A-Z][A-Za-zÄÖÜäöüß0-9 -]{1,30}?)\s+(?:User|zu\s+qualifizieren)/i);
+    if (alsM) { result.requiredItem = alsM[1].trim(); matched = true; }
+  }
+
+  // 4d) "für X Quote" / "für X zu qualifizieren"
+  if (!result.requiredItem) {
+    const fuerM = s.match(/f[üu]r\s+([A-Z][A-Za-zÄÖÜäöüß0-9 -]{1,30}?)\s+(?:Quote|zu\s+qualifizieren)/i);
+    if (fuerM) {
+      let item = fuerM[1].trim().replace(/\s+(?:Quote)\s*$/i, '').trim();
+      if (item) { result.requiredItem = item; matched = true; }
     }
   }
 
@@ -3903,32 +3945,52 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
                      (item.screenout_codes || []).map(String).includes(String(a.code)),
         }));
         itemQuote = formatSegmentQuotes(itemQuote, opts.idiProfile);
-        writeQuestionColumn(ws, currentCol, item.item_label || '', itemNote,
+        // v12.22.22 (Bug 8): Bei VS-Forced-Choice das Item-Label fuer Z7 kuerzen.
+        // Das volle "1: Aussage A VS Aussage B" wird zu kompaktem "Item 1" (oder
+        // mit Nummer-Prefix wenn vorhanden), die kompletten Aussagen landen in
+        // Z6 mit A/B-Pills (siehe unten).
+        let z7Label = item.item_label || '';
+        if (z7Label && / VS /i.test(z7Label)) {
+          // Versuche Nummern-Prefix zu extrahieren ("1: ..." → "Item 1")
+          const numMatch = z7Label.match(/^(\d+)\s*[:.]/);
+          z7Label = numMatch ? `Item ${numMatch[1]}` : 'Item';
+        }
+        writeQuestionColumn(ws, currentCol, z7Label, itemNote,
                             ants, itemQuote, tnEnd, gruppe, frage, isLast, allGruppen, uniformQuoteRow);
 
-        // v12.22.22 (Bug 8): Forced-Choice A/B — wenn das Item beide Aussagen
-        // hat (item.aussage_a + item.aussage_b), schreiben wir sie gestapelt
-        // in Z6 mit A/B-Pills. Damit kann der Recruiter beide vorlesen und
-        // der TN entscheidet A/B/Keine. writeQuestionColumn skipped Z6 bei
-        // Matrix-Items eh (isMatrixItemColumn=true), wir koennen sie also
-        // hier sicher setzen.
+        // v12.22.22 (Bug 8): Forced-Choice A/B — zwei Quellen:
+        //  Variante 1: Parser liefert getrennte Felder item.aussage_a + item.aussage_b
+        //  Variante 2: Parser bündelt beide im item_label mit ' VS '-Trenner
+        //              (z.B. "1: Ich ergreife die Initiative VS Ich lasse mich treiben")
+        // Beide Wege werden hier abgefangen. Z6 wird mit A/B-Pills bestueckt,
+        // sodass der Recruiter beide Aussagen vorlesen kann.
+        let aussageA = null, aussageB = null;
         if (item.aussage_a && item.aussage_b) {
+          aussageA = String(item.aussage_a).trim();
+          aussageB = String(item.aussage_b).trim();
+        } else if (item.item_label && / VS /i.test(item.item_label)) {
+          // VS-Trenner: optional Nummern-Prefix "1: ..." beibehalten in A
+          const parts = item.item_label.split(/\s+VS\s+/i);
+          if (parts.length === 2) {
+            aussageA = parts[0].trim();
+            aussageB = parts[1].trim();
+          }
+        }
+        if (aussageA && aussageB) {
           const longCell = ws.getCell(LONG_QUESTION_ROW, currentCol);
           longCell.value = {
             richText: [
               { text: 'A', font: { name: 'Arial', size: 8, bold: true, color: { argb: 'FF042C53' } } },
-              { text: '  ' + String(item.aussage_a).trim() + '\n\n',
+              { text: '  ' + aussageA + '\n\n',
                 font: { name: 'Arial', size: 9, italic: true, color: { argb: 'FF333333' } } },
               { text: 'B', font: { name: 'Arial', size: 8, bold: true, color: { argb: 'FF4B1528' } } },
-              { text: '  ' + String(item.aussage_b).trim(),
+              { text: '  ' + aussageB,
                 font: { name: 'Arial', size: 9, italic: true, color: { argb: 'FF333333' } } },
             ],
           };
           longCell.alignment = { horizontal: 'left', vertical: 'top', wrapText: true };
           longCell.border = { ...THIN_BORDER };
-          // Zeilenhoehe anpassen — Anzahl Zeichen / 35 = grobe Schaetzung der
-          // Wraps, Mindesthoehe 60px fuer kurze Aussagen.
-          const lenSum = String(item.aussage_a).length + String(item.aussage_b).length;
+          const lenSum = aussageA.length + aussageB.length;
           const estLines = Math.max(4, Math.ceil(lenSum / 35) + 2);
           const targetH = Math.min(160, 14 * estLines);
           const curH = ws.getRow(LONG_QUESTION_ROW).height || 15;
