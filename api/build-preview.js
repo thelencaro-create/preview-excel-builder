@@ -1,5 +1,20 @@
 // api/build-preview.js
-// Preview Generator – Excel Builder v12.22.21 (Notiz/Sprach/Matrix-Fixes)
+// Preview Generator – Excel Builder v12.22.22 (Robustheits-Fixes)
+//
+// v12.22.22 (20.05.2026): 4 weitere Bugfixes aus Test-Runs AI/got2b:
+// - Bug 5: #VALUE!-Errors in Template-Headern (Z1-Z4) werden defensiv geleert.
+//          Templates hatten in F1/E1 einen gespeicherten Excel-Error — bis zur
+//          Re-Generation der Templates fängt der Builder das ab.
+// - Bug 6: Quotengruppen-Marker fuer quoten-relevante Matrix-Items: 📌 +
+//          amber Header-Hintergrund, sodass Recruiter sofort sieht WO eine
+//          Quotengruppe entsteht (z.B. 'ChatGPT' bei QAIFREQUENCY).
+// - Bug 7: ENDE-Code-Heuristik: parseExclusionCodes() extrahiert aus
+//          quoteText-Strings Muster wie 'MUSS Code X' / 'nur Code X' und
+//          markiert die NICHT-erlaubten Codes rot. Konservativ: lieber kein
+//          Marker als ein falscher.
+// - Bug 8: Forced-Choice A/B-Matrizen: Wenn JSON 'aussage_a' + 'aussage_b'
+//          pro Item liefert, werden beide Aussagen mit A/B-Pills gestapelt
+//          in Z6 dargestellt (vorher nur Aussage A sichtbar).
 //
 // v12.22.21 (20.05.2026): 4 Bugfixes aus Test-Run AI-Preview:
 // - Bug 1: Quotenübersicht — Frage-Header pro Gruppe einmal, Codes eingerückt
@@ -1772,6 +1787,55 @@ function isAntOffTarget(frage, ant, gruppe) {
     return true;
   }
 
+  // v12.22.22 (Bug 7): Heuristik aus quoteText-String. Wenn die Quote-Anweisung
+  // 'MUSS Code X' o.ae. enthaelt, sind alle anderen Codes off-target. Bei Matrix-
+  // Items wird zusaetzlich die Item-Bedingung beruecksichtigt (requiredItem).
+  // Konservativ: nur greifen wenn parseExclusionCodes ein konkretes Match hat.
+  const quoteSource = frage && (frage.quotenkommentar || frage.bedingung || '');
+  if (quoteSource) {
+    const parsed = parseExclusionCodes(String(quoteSource));
+    if (parsed) {
+      // Code-Nummer der aktuellen Antwort ermitteln
+      const antCode = typeof ant.code === 'number' ? ant.code
+                    : typeof ant.code === 'string' ? parseInt(ant.code, 10)
+                    : null;
+      if (antCode !== null && !isNaN(antCode)) {
+        // Item-Filter: Wenn requiredItem gesetzt, ist diese Heuristik nur fuer
+        // die passende Item-Spalte (frage.item_label/kurz_label/fragetext)
+        // anwendbar. Bei Mismatch fuer Items, wird die Logik UMGEKEHRT angewandt:
+        // andere Items duerfen den requiredCode NICHT haben.
+        const itemLabel = (frage.item_label || '').toLowerCase().trim();
+        const labelLower = itemLabel || (frage.kurz_label || '').toLowerCase().trim();
+        let isMatchingItem = true;
+        if (parsed.requiredItem && labelLower) {
+          const reqItem = parsed.requiredItem.toLowerCase().trim();
+          // Match wenn requiredItem-Substring im Item-Label vorkommt oder umgekehrt
+          isMatchingItem = labelLower.includes(reqItem) || reqItem.includes(labelLower);
+        }
+
+        // Logik 1: requiredCodes-Liste (exakte Codes)
+        if (parsed.requiredCodes && parsed.requiredCodes.length > 0) {
+          if (isMatchingItem) {
+            // Bei matching Item: Codes ausserhalb der requiredCodes-Liste = off
+            if (!parsed.requiredCodes.includes(antCode)) return true;
+          } else if (parsed.requiredItem) {
+            // Bei mismatching Item (aber Item-Bedingung gesetzt):
+            // Der requiredCode IST off-target (TN darf hier NICHT diesen Code waehlen)
+            if (parsed.requiredCodes.includes(antCode)) return true;
+          }
+        }
+        // Logik 2: Range (minCode/maxCode)
+        if (parsed.minCode !== null || parsed.maxCode !== null) {
+          if (isMatchingItem) {
+            const min = parsed.minCode !== null ? parsed.minCode : 1;
+            const max = parsed.maxCode !== null ? parsed.maxCode : 99;
+            if (antCode < min || antCode > max) return true;
+          }
+        }
+      }
+    }
+  }
+
   return false;
 }
 
@@ -1978,20 +2042,44 @@ function writeQuestionColumn(ws, col, label, note, antList, quoteText, tnEnd, gr
   // hat das bereits gestrippt. Hier zusätzliche Sicherung für Labels, die nicht
   // durch buildHeaderLabel gegangen sind (Matrix-Items, summaryLabel etc.):
   const cleanLabel = stripQCode(label);
+
+  // v12.22.22 (Bug 6): Quotengruppen-Marker fuer quoten-relevante Matrix-Items.
+  // Wenn diese Spalte das requiredItem der Quote-Anweisung ist (z.B. ChatGPT-
+  // Spalte bei QAIFREQUENCY mit 'als ChatGPT User qualifizieren'), bekommt sie
+  // ein 📌 + amber Header-Hintergrund, sodass der Recruiter sofort erkennt
+  // dass hier eine Quotengruppe entsteht.
+  let isQuotaRelevantColumn = false;
+  if (quoteText && Array.isArray(frage && frage.items)) {
+    const parsedHeader = parseExclusionCodes(String(quoteText));
+    if (parsedHeader && parsedHeader.requiredItem && cleanLabel) {
+      const reqItem = parsedHeader.requiredItem.toLowerCase().trim();
+      const labelLower = cleanLabel.toLowerCase().trim();
+      // Match wenn das Item-Label das requiredItem enthaelt (oder umgekehrt)
+      if (labelLower.includes(reqItem) || reqItem.includes(labelLower)) {
+        isQuotaRelevantColumn = true;
+      }
+    }
+  }
+  const quotaPrefix = isQuotaRelevantColumn ? '📌 ' : '';
+
   if (showFragetextInHeader) {
     h.value = {
       richText: [
-        { text: prefix + cleanLabel,      font: { bold: true,  name: 'Arial', size: 9, color: { argb: 'FF000000' } } },
+        { text: quotaPrefix + prefix + cleanLabel,      font: { bold: true,  name: 'Arial', size: 9, color: { argb: isQuotaRelevantColumn ? 'FF412402' : 'FF000000' } } },
         { text: '\n',                     font: { name: 'Arial', size: 8 } },
         { text: ftClean,                  font: { italic: true, name: 'Arial', size: 8, color: { argb: 'FF555555' } } },
       ],
     };
   } else {
-    h.value = prefix + cleanLabel;
-    h.font = { bold: true, name: 'Arial', size: 9, color: { argb: 'FF000000' } };
+    h.value = quotaPrefix + prefix + cleanLabel;
+    h.font = { bold: true, name: 'Arial', size: 9, color: { argb: isQuotaRelevantColumn ? 'FF412402' : 'FF000000' } };
   }
   h.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
-  h.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: isConditional ? (clusterLightArgb || 'FFFFF2CC') : COLORS.HEADER_GREY } };
+  // v12.22.22 (Bug 6): Amber-Hintergrund bei quoten-relevanten Spalten
+  // (uberschreibt den regulaeren COLORS.HEADER_GREY / clusterLightArgb)
+  const headerFill = isQuotaRelevantColumn ? 'FFFAEEDA'  // amber (c-amber 50)
+                   : (isConditional ? (clusterLightArgb || 'FFFFF2CC') : COLORS.HEADER_GREY);
+  h.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: headerFill } };
   h.border = headerBorder;
   // v12.22.21 (Bug 3 / User-Wunsch): Comment am Header entfernt — Z6 ist die
   // Quelle für den Fragetext. Bedingungen erscheinen weiterhin in der
@@ -2332,6 +2420,75 @@ function stripQCode(label) {
   // Wenn nichts gestripped wurde (Frage-Nr-Pattern wie 'Q1.'), Original zurück
   if (stripped === s) return prefix + s;
   return (prefix + stripped).trim();
+}
+
+// v12.22.22 (Bug 7): Heuristik fuer ENDE-Codes aus Quote-Text-Strings.
+// Liest Muster wie 'MUSS Code 02', 'nur Code 1 erlaubt', 'mindestens einmal im
+// Monat' und gibt strukturierte Markierungen zurueck.
+//
+// Rueckgabe: { requiredCodes: number[], requiredItem: string | null,
+//              minCode: number | null, maxCode: number | null }
+//
+// requiredCodes : Codes die OK sind (alle anderen → ENDE)
+// requiredItem  : Wenn die Quote nur fuer EIN Matrix-Item gilt (z.B. "ChatGPT-
+//                 User"), Name des Items. Sonst null = gilt fuer alle Items.
+// minCode/maxCode: Bei Range-Patterns ('mindestens einmal im Monat' → Code <=3)
+//
+// Konservativ: lieber leeres Ergebnis als falsches Match. Liefert null wenn
+// nichts erkannt wurde.
+function parseExclusionCodes(quoteText) {
+  if (!quoteText || typeof quoteText !== 'string') return null;
+  const s = quoteText;
+  const result = { requiredCodes: [], requiredItem: null, minCode: null, maxCode: null };
+  let matched = false;
+
+  // Pattern 1: "MUSS Code X" / "MUSS C0X" / "Code X waehlen" / "nur Code X"
+  // Erlaubt: Code, code, Cod, C, c (Letzteres fuer 'C02'-Notation)
+  const reqMatch = s.match(/(?:MUSS|MUSS\s+nur|nur)\s*C(?:ode?)?\s*0?(\d{1,2})/i);
+  if (reqMatch) {
+    result.requiredCodes.push(parseInt(reqMatch[1], 10));
+    matched = true;
+  }
+
+  // Pattern 2: "Code 1-3" / "Code 1 bis 3" (Range)
+  const rangeMatch = s.match(/Code\s+0?(\d{1,2})\s*[-\u2013\u2014bis]+\s*0?(\d{1,2})/i);
+  if (rangeMatch) {
+    result.minCode = parseInt(rangeMatch[1], 10);
+    result.maxCode = parseInt(rangeMatch[2], 10);
+    matched = true;
+  }
+
+  // Pattern 3: "mindestens einmal im Monat" / "min. einmal im Monat"
+  // Mapping: Skala 1=Tag, 2=Woche, 3=Monat, 4=<Monat, 5=Nie
+  if (/mindestens\s+(?:einmal\s+)?(?:pro|im|am)\s+(?:Tag|Woche|Monat)/i.test(s)) {
+    result.maxCode = 3; // alles bis "Monat" inklusiv
+    matched = true;
+  }
+
+  // Pattern 4: "hauptsaechlich in X" / "kauft hauptsaechlich in X"
+  //   → impliziert: requiredCode=1 ("Hauptsaechlich") + item=X
+  const hauptMatch = s.match(/haupts[äa]chlich\s+in\s+(?:der\s+|die\s+|das\s+|den\s+|dem\s+)?([A-Za-zÄÖÜäöüß][A-Za-zÄÖÜäöüß0-9 -]{2,30})/i);
+  if (hauptMatch) {
+    if (!result.requiredCodes.includes(1)) result.requiredCodes.push(1);
+    let item = hauptMatch[1].trim().replace(/\s+(?:ein|kauft|kaufen|nutzen|verwenden).*$/i, '').trim();
+    if (item && !result.requiredItem) result.requiredItem = item;
+    matched = true;
+  }
+
+  // Pattern 5: Item-Bezug "fuer X" / "als X User" / "bei X"
+  if (!result.requiredItem) {
+    const itemMatch = s.match(/(?:f[üu]r|als|bei)\s+([A-Za-z][A-Za-z0-9 -]{2,30})(?:-User|User)?/i);
+    if (itemMatch) {
+      let item = itemMatch[1].trim();
+      item = item.replace(/\s+(?:User|qualifizieren|ausw[äa]hlen|nutzen|verwenden|kauft|kaufen).*$/i, '').trim();
+      if (item && item.length > 1 && item.length < 30) {
+        result.requiredItem = item;
+        matched = true;
+      }
+    }
+  }
+
+  return matched ? result : null;
 }
 
 // v12.17: Erkennt Alter-/Geschlecht-Fragen, damit bei diesen KEIN Fragetext
@@ -3748,6 +3905,36 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
         itemQuote = formatSegmentQuotes(itemQuote, opts.idiProfile);
         writeQuestionColumn(ws, currentCol, item.item_label || '', itemNote,
                             ants, itemQuote, tnEnd, gruppe, frage, isLast, allGruppen, uniformQuoteRow);
+
+        // v12.22.22 (Bug 8): Forced-Choice A/B — wenn das Item beide Aussagen
+        // hat (item.aussage_a + item.aussage_b), schreiben wir sie gestapelt
+        // in Z6 mit A/B-Pills. Damit kann der Recruiter beide vorlesen und
+        // der TN entscheidet A/B/Keine. writeQuestionColumn skipped Z6 bei
+        // Matrix-Items eh (isMatrixItemColumn=true), wir koennen sie also
+        // hier sicher setzen.
+        if (item.aussage_a && item.aussage_b) {
+          const longCell = ws.getCell(LONG_QUESTION_ROW, currentCol);
+          longCell.value = {
+            richText: [
+              { text: 'A', font: { name: 'Arial', size: 8, bold: true, color: { argb: 'FF042C53' } } },
+              { text: '  ' + String(item.aussage_a).trim() + '\n\n',
+                font: { name: 'Arial', size: 9, italic: true, color: { argb: 'FF333333' } } },
+              { text: 'B', font: { name: 'Arial', size: 8, bold: true, color: { argb: 'FF4B1528' } } },
+              { text: '  ' + String(item.aussage_b).trim(),
+                font: { name: 'Arial', size: 9, italic: true, color: { argb: 'FF333333' } } },
+            ],
+          };
+          longCell.alignment = { horizontal: 'left', vertical: 'top', wrapText: true };
+          longCell.border = { ...THIN_BORDER };
+          // Zeilenhoehe anpassen — Anzahl Zeichen / 35 = grobe Schaetzung der
+          // Wraps, Mindesthoehe 60px fuer kurze Aussagen.
+          const lenSum = String(item.aussage_a).length + String(item.aussage_b).length;
+          const estLines = Math.max(4, Math.ceil(lenSum / 35) + 2);
+          const targetH = Math.min(160, 14 * estLines);
+          const curH = ws.getRow(LONG_QUESTION_ROW).height || 15;
+          if (targetH > curH) ws.getRow(LONG_QUESTION_ROW).height = targetH;
+        }
+
         currentCol++;
       }
 
@@ -3796,9 +3983,14 @@ function fillSheet(ws, gruppe, fragen, projektnummer, projektname, kundenname, s
       // Vorher war Z6 bei Matrix-Items komplett leer, weil writeQuestionColumn
       // die Z6-Befüllung bei isMatrixItemColumn=true skippt. Jetzt schreiben wir
       // den Fragetext einmal zentral hier.
+      // v12.22.22 (Bug 8): Skip wenn Forced-Choice A/B — dann hat jedes Item
+      // bereits seine eigene Z6 mit A/B-Pills (siehe Item-Loop oben).
+      const isForcedChoiceAB = Array.isArray(frage.items) && frage.items.some(
+        it => it && it.aussage_a && it.aussage_b
+      );
       const matrixFragetext = (frage.fragetext || '').trim();
       const matrixKurzClean = stripQCode(frage.kurz_label || frage.kurzlabel || '').trim();
-      if (matrixFragetext && matrixFragetext.toLowerCase() !== matrixKurzClean.toLowerCase()) {
+      if (!isForcedChoiceAB && matrixFragetext && matrixFragetext.toLowerCase() !== matrixKurzClean.toLowerCase()) {
         if (matrixEnd > matrixStart) {
           try {
             ws.mergeCells(LONG_QUESTION_ROW, matrixStart, LONG_QUESTION_ROW, matrixEnd);
@@ -4043,6 +4235,25 @@ export default async function handler(req, res) {
     const templateBuffer = Buffer.from(templateBase64, 'base64');
     const template = new ExcelJS.Workbook();
     await template.xlsx.load(templateBuffer);
+
+    // v12.22.22 (Bug 5): Defensive Reinigung gespeicherter Excel-Errors
+    // (#VALUE!, #REF!, #NAME?, #DIV/0!, #N/A, #NULL!, #NUM!) in den Header-
+    // Zeilen Z1-Z4 ALLER Template-Sheets. Die aktuell deployten Templates
+    // haben in F1/E1 einen geerbten #VALUE!-Error (Reste einer nicht
+    // aufgeloesten Formel beim Template-Speichern). Bis die Templates
+    // re-generiert sind, faengt der Builder das hier ab.
+    for (const tplSheet of template.worksheets) {
+      for (let r = 1; r <= 4; r++) {
+        for (let c = 1; c <= 20; c++) {
+          const cell = tplSheet.getCell(r, c);
+          if (cell && cell.type === ExcelJS.ValueType.Error) {
+            cell.value = null;
+          } else if (typeof cell.value === 'string' && /^#(VALUE|REF|NAME|DIV\/0|N\/A|NULL|NUM)[!?]$/i.test(cell.value)) {
+            cell.value = null;
+          }
+        }
+      }
+    }
 
     // v12.16: Template-Sheet wird PRO GRUPPE ausgewaehlt (Mixed GD+IDI Projekte).
     // Frueher wurde global ein srcWs gewaehlt (basierend auf req.body.methode),
