@@ -1,5 +1,13 @@
 // api/build-preview.js
-// Preview Generator – Excel Builder v12.22.25 (Bug-10-Fix: Single-Group VDI)
+// Preview Generator – Excel Builder v12.22.25b (Scope-Fix)
+//
+// v12.22.25b (21.05.2026): Hotfix — v12.22.25 hatte ReferenceError zur
+//   Laufzeit weil 'allGruppen' im buildOverviewSheet-Scope nicht existiert
+//   (dort heisst der Parameter 'gruppen'). Der ReferenceError wurde von
+//   einem outer try/catch geschluckt und das Excel teilweise zurueck-
+//   geliefert — ohne den Anforderungs-Block, exakt das Symptom Bug 10
+//   das wir eigentlich fixen wollten. v12.22.25b: alle 'allGruppen' →
+//   'gruppen' in dem Code-Block ersetzt.
 //
 // v12.22.25 (21.05.2026): Hotfix Bug 10 nach Test-Run 26_1051_6299_UX:
 // - Bug 10: Bei VDI-/IDI-Studien mit nur EINER Gruppe (12 Slots in einer
@@ -3312,10 +3320,13 @@ function buildOverviewSheet(workbook, gruppen, fragen, studienQuoten, idiProfile
       // v12.22.25 (Bug 10): Bei nur EINER Gruppe (typischer VDI-/IDI-Fall mit
       // 12 Slots in einer Methoden-Gruppe) sind alle globalen Hinweise per
       // Definition gruppen-relevant — Filter wuerde fast alles rauswerfen,
-      // weil keine "VDI1:"-Marker im Text sind. Wenn allGruppen.length <= 1,
+      // weil keine "VDI1:"-Marker im Text sind. Wenn gruppen.length <= 1,
       // einfach alle globalen Hinweise unveraendert uebernehmen.
+      // v12.22.25b: Scope-Fix — in buildOverviewSheet heisst der Parameter
+      // 'gruppen', NICHT 'allGruppen' (das war ein Naming-Mismatch zu
+      // fillSheet wo es allGruppen heisst). ReferenceError sonst.
       const globalHinweiseFallback = collectGlobalHinweise(fragen);
-      const isSingleGroup = !Array.isArray(allGruppen) || allGruppen.length <= 1;
+      const isSingleGroup = !Array.isArray(gruppen) || gruppen.length <= 1;
       const gruppenSpezifischeHinweise = [];
       if (isSingleGroup) {
         // Eine Gruppe → komplette globale Hinweise uebernehmen
@@ -3328,7 +3339,7 @@ function buildOverviewSheet(workbook, gruppen, fragen, studienQuoten, idiProfile
       } else {
         // Mehrere Gruppen → pro Gruppe filtern
         for (const h of globalHinweiseFallback) {
-          const filtered = filterQuoteByGruppe(h.text, gruppe.id, allGruppen);
+          const filtered = filterQuoteByGruppe(h.text, gruppe.id, gruppen);
           // Anzeigen wenn:
           //  (a) nach Filter wurde etwas weggekürzt (= war GD-spezifisch),
           //  (b) UND der gefilterte Rest ist nicht leer
