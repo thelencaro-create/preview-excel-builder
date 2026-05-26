@@ -1,5 +1,17 @@
 // api/build-preview.js
-// Preview Generator – Excel Builder v12.22.24 (Bug-9-Fix: VGD-Sektionen)
+// Preview Generator – Excel Builder v12.22.25 (Bug-10-Fix: Single-Group VDI)
+//
+// v12.22.25 (21.05.2026): Hotfix Bug 10 nach Test-Run 26_1051_6299_UX:
+// - Bug 10: Bei VDI-/IDI-Studien mit nur EINER Gruppe (12 Slots in einer
+//   Methoden-Gruppe) war die Anforderungen-Sektion in der Quotenuebersicht
+//   komplett leer — nicht mal das '(keine Gruppen-spezifischen)'-Fallback
+//   wurde angezeigt. Ursache: v12.22.24-Filter "filterQuoteByGruppe" warf
+//   alle globalen Hinweise raus, weil sie keine "VDI:"-Marker enthielten —
+//   bei nur einer Gruppe gibt es ja gar keine Notwendigkeit zu filtern.
+//   Fix: allGruppen.length <= 1 wird erkannt → alle globalen Hinweise
+//   unveraendert pro Gruppe uebernehmen. Header-Label angepasst zu
+//   "HINWEISE FUER DEN REKRUTIERER (gelten fuer diese Gruppe)" statt
+//   "SPEZIFISCH FUER VDI" (was bei single group missverstaendlich war).
 //
 // v12.22.24 (21.05.2026): Hotfix Bug 9 nach Test-Run 26_2345_3657_AI:
 // - Bug 9 (Regress aus v12.22.21 Bug 2): VGD-Sektionen in der Quoten-
@@ -3297,18 +3309,35 @@ function buildOverviewSheet(workbook, gruppen, fragen, studienQuoten, idiProfile
       // satz-weise gefiltert, sodass GD1-Sätze nur in VGD1 erscheinen, GD2 nur
       // in VGD2 etc. Wenn nach Filter etwas übrig bleibt UND es nicht 1:1
       // identisch zum globalen Text ist → anzeigen.
+      // v12.22.25 (Bug 10): Bei nur EINER Gruppe (typischer VDI-/IDI-Fall mit
+      // 12 Slots in einer Methoden-Gruppe) sind alle globalen Hinweise per
+      // Definition gruppen-relevant — Filter wuerde fast alles rauswerfen,
+      // weil keine "VDI1:"-Marker im Text sind. Wenn allGruppen.length <= 1,
+      // einfach alle globalen Hinweise unveraendert uebernehmen.
       const globalHinweiseFallback = collectGlobalHinweise(fragen);
+      const isSingleGroup = !Array.isArray(allGruppen) || allGruppen.length <= 1;
       const gruppenSpezifischeHinweise = [];
-      for (const h of globalHinweiseFallback) {
-        const filtered = filterQuoteByGruppe(h.text, gruppe.id, allGruppen);
-        // Anzeigen wenn:
-        //  (a) nach Filter wurde etwas weggekürzt (= war GD-spezifisch),
-        //  (b) UND der gefilterte Rest ist nicht leer
-        if (filtered && filtered.trim() !== h.text.trim()) {
+      if (isSingleGroup) {
+        // Eine Gruppe → komplette globale Hinweise uebernehmen
+        for (const h of globalHinweiseFallback) {
           gruppenSpezifischeHinweise.push({
             frageLabel: h.frageLabel,
-            text: filtered,
+            text: h.text,
           });
+        }
+      } else {
+        // Mehrere Gruppen → pro Gruppe filtern
+        for (const h of globalHinweiseFallback) {
+          const filtered = filterQuoteByGruppe(h.text, gruppe.id, allGruppen);
+          // Anzeigen wenn:
+          //  (a) nach Filter wurde etwas weggekürzt (= war GD-spezifisch),
+          //  (b) UND der gefilterte Rest ist nicht leer
+          if (filtered && filtered.trim() !== h.text.trim()) {
+            gruppenSpezifischeHinweise.push({
+              frageLabel: h.frageLabel,
+              text: filtered,
+            });
+          }
         }
       }
       if (gruppenSpezifischeHinweise.length === 0) {
@@ -3324,7 +3353,10 @@ function buildOverviewSheet(workbook, gruppen, fragen, studienQuoten, idiProfile
       } else {
         ws.mergeCells(`B${row}:D${row}`);
         const ah = ws.getCell(`B${row}`);
-        ah.value = `✅ ANFORDERUNGEN SPEZIFISCH FÜR ${(gruppe.id || '').toString().toUpperCase()}`;
+        // v12.22.25: Bei single group "ALLE HINWEISE" — sonst "SPEZIFISCH FÜR {id}"
+        ah.value = isSingleGroup
+          ? '✅ HINWEISE FÜR DEN REKRUTIERER (gelten für diese Gruppe)'
+          : `✅ ANFORDERUNGEN SPEZIFISCH FÜR ${(gruppe.id || '').toString().toUpperCase()}`;
         ah.font = { name: 'Calibri', size: 11, bold: true, color: { argb: 'FF548235' } };
         ah.alignment = { horizontal: 'left', vertical: 'middle', indent: 1 };
         ws.getRow(row).height = 22;
